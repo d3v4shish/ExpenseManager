@@ -8,6 +8,7 @@ block_cipher = None
 datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "src" / "expenses" / "defaults"), "src/expenses/defaults"),
+    (str(ROOT / "src" / "expenses" / "ui" / "cards"), "src/expenses/ui/cards"),
 ]
 
 a = Analysis(

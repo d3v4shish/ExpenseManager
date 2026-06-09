@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "expense-manager-pyqt"
 version = "0.1.0"
-description = "Standalone PyQt expense manager extracted from noc_dashboard_pyqt."
+description = "Standalone PyQt expense manager."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
