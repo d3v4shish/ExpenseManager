@@ -1,0 +1,128 @@
+{
+  "banks": [
+    {
+      "id": "sbi",
+      "name": "SBI",
+      "match": {
+        "fromContains": [
+          "cbsalerts.sbi@alerts.sbi.co.in",
+          "cbsalerts.sbi@alerts.sbi.bank.in"
+        ],
+        "subjectContains": [
+          "cbssbi alert",
+          "sbi alert"
+        ]
+      },
+      "extractor": {
+        "type": "class",
+        "target": "sbi"
+      },
+      "fields": {
+        "directionRules": [
+          {
+            "type": "credit",
+            "patterns": [
+              "credited\\s+inr",
+              "deposit by transfer"
+            ]
+          },
+          {
+            "type": "debit",
+            "patterns": [
+              "debited\\s+inr",
+              "debited from your a/c",
+              "debited from your a\\/c",
+              "debit by transfer",
+              "has a debit by transfer"
+            ]
+          }
+        ],
+        "amountPatterns": [
+          "(?:credited|debited)\\s+inr\\s+([0-9,]+(?:\\.[0-9]{2})?)",
+          "inr\\s+([0-9,]+(?:\\.[0-9]{2})?)",
+          "debit by transfer of rs\\s*([0-9,]+(?:\\.[0-9]{2})?)"
+        ],
+        "transactionIdPatterns": [
+          "upi\\/p2a\\/([0-9a-z]+)\\/",
+          "ref(?:erence)?(?:\\s+no\\.|\\s+id|\\s*[:\\-])\\s*([0-9a-z\\-/]+)"
+        ],
+        "counterpartyPatterns": [
+          "transfer from\\s+([a-z0-9 .&_-]+?)(?:\\.\\s+avl\\s+bal|\\.|$)",
+          "transferred to\\s+(?:mr\\.?\\s+|ms\\.?\\s+|mrs\\.?\\s+)?([a-z0-9 .&_-]+?)(?:\\.\\s+avl\\s+bal|\\.|$)",
+          "upi\\/p2a\\/[0-9a-z]+\\/([a-z0-9 .&_-]+)"
+        ],
+        "accountSuffixPatterns": [
+          "a\\/c\\s+x+([0-9]{4,})",
+          "a\\/c\\s+xx+([0-9]{4,})"
+        ],
+        "dateTimePatterns": [
+          "(\\d{2}/\\d{2}/\\d{2})\\s+(\\d{2}:\\d{2}:\\d{2})",
+          "on\\s+(\\d{2}/\\d{2}/\\d{2})"
+        ]
+      }
+    },
+    {
+      "id": "axis",
+      "name": "Axis Bank",
+      "match": {
+        "fromContains": [
+          "alerts@axis.bank.in",
+          "alerts@axisbank.com"
+        ],
+        "subjectContains": [
+          "debited from your a/c",
+          "credited to your a/c",
+          "debit notification from axis bank",
+          "credit notification from axis bank",
+          "was debited from your a/c",
+          "was credited to your a/c"
+        ]
+      },
+      "extractor": {
+        "type": "class",
+        "target": "axis"
+      },
+      "fields": {
+        "directionRules": [
+          {
+            "type": "debit",
+            "patterns": [
+              "amount debited",
+              "debited from your a/c",
+              "was debited"
+            ]
+          },
+          {
+            "type": "credit",
+            "patterns": [
+              "amount credited",
+              "credited to your a/c",
+              "was credited"
+            ]
+          }
+        ],
+        "amountPatterns": [
+          "amount debited\\s*[:\\-]?\\s*inr\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+          "amount credited\\s*[:\\-]?\\s*inr\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+          "inr\\s*([0-9,]+(?:\\.[0-9]{2})?)"
+        ],
+        "transactionIdPatterns": [
+          "upi\\/p2a\\/([0-9a-z]+)\\/",
+          "transaction(?:\\s+info|\\s+id|\\s+ref(?:erence)?)?\\s*[:\\-]?\\s*([0-9a-z\\-/]+)"
+        ],
+        "counterpartyPatterns": [
+          "upi\\/p2a\\/[0-9a-z]+\\/([a-z0-9 .&_-]+)",
+          "paid to\\s+([a-z0-9 .&_-]+)"
+        ],
+        "accountSuffixPatterns": [
+          "account number\\s*[:\\-]?\\s*x+([0-9]{4,})",
+          "a\\/c\\s+no\\.\\s*x+([0-9]{4,})"
+        ],
+        "dateTimePatterns": [
+          "(\\d{2}-\\d{2}-\\d{2}),\\s*(\\d{2}:\\d{2}:\\d{2})\\s*ist",
+          "(\\d{2}-\\d{2}-\\d{4}),\\s*(\\d{2}:\\d{2}:\\d{2})\\s*ist"
+        ]
+      }
+    }
+  ]
+}

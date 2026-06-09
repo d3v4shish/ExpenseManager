@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "label": "Bills due", "value": "₹8,240", "tone": "rose", "note": "Internet, power, cloud" },
+    { "label": "This week", "value": "₹3,180", "tone": "amber", "note": "Food, cabs, misc" },
+    { "label": "Budget left", "value": "₹21,600", "tone": "emerald", "note": "Month still healthy" },
+    { "label": "Auto-detected", "value": "14 mails", "tone": "cyan", "note": "Need categorization pass" }
+  ]
+}

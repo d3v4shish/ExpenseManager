@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Expense Manager app icon">
+  <defs>
+    <style>
+      .bg { fill: #000000; }
+      .fg { fill: #f2efe6; stroke: #f2efe6; }
+      .stroke { fill: none; stroke: #f2efe6; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="96" y="96" width="832" height="832"/>
+  <rect class="stroke" x="128" y="128" width="768" height="768" stroke-width="24"/>
+
+  <rect class="stroke" x="208" y="184" width="608" height="656" stroke-width="20"/>
+  <rect class="fg" x="208" y="184" width="608" height="88"/>
+
+  <path class="bg" d="M250 236 L296 202 L342 236 Z"/>
+  <rect class="bg" x="266" y="236" width="60" height="10"/>
+  <rect class="bg" x="276" y="248" width="12" height="30"/>
+  <rect class="bg" x="294" y="248" width="12" height="30"/>
+  <rect class="bg" x="312" y="248" width="12" height="30"/>
+  <rect class="bg" x="264" y="282" width="64" height="10"/>
+  <rect class="bg" x="390" y="218" width="172" height="18"/>
+  <rect class="bg" x="648" y="216" width="112" height="24"/>
+
+  <rect class="stroke" x="248" y="336" width="528" height="312" stroke-width="16"/>
+  <line class="stroke" x1="248" y1="398" x2="776" y2="398" stroke-width="10"/>
+  <line class="stroke" x1="248" y1="460" x2="776" y2="460" stroke-width="10"/>
+  <line class="stroke" x1="248" y1="522" x2="776" y2="522" stroke-width="10"/>
+  <line class="stroke" x1="248" y1="584" x2="776" y2="584" stroke-width="10"/>
+  <line class="stroke" x1="376" y1="336" x2="376" y2="648" stroke-width="10"/>
+  <line class="stroke" x1="602" y1="336" x2="602" y2="648" stroke-width="10"/>
+
+  <rect class="fg" x="274" y="362" width="72" height="18"/>
+  <rect class="fg" x="410" y="362" width="152" height="18"/>
+  <rect class="fg" x="634" y="362" width="94" height="18"/>
+  <rect class="fg" x="274" y="424" width="72" height="18"/>
+  <rect class="fg" x="410" y="424" width="118" height="18"/>
+  <rect class="fg" x="634" y="424" width="110" height="18"/>
+  <rect class="fg" x="274" y="486" width="72" height="18"/>
+  <rect class="fg" x="410" y="486" width="176" height="18"/>
+  <rect class="fg" x="634" y="486" width="78" height="18"/>
+  <rect class="fg" x="274" y="548" width="72" height="18"/>
+  <rect class="fg" x="410" y="548" width="136" height="18"/>
+  <rect class="fg" x="634" y="548" width="116" height="18"/>
+  <rect class="fg" x="274" y="610" width="72" height="18"/>
+  <rect class="fg" x="410" y="610" width="158" height="18"/>
+  <rect class="fg" x="634" y="610" width="86" height="18"/>
+
+  <rect class="stroke" x="248" y="704" width="118" height="72" stroke-width="14"/>
+  <rect class="fg" x="276" y="730" width="64" height="14"/>
+  <rect class="fg" x="276" y="754" width="46" height="10"/>
+  <rect class="fg" x="414" y="734" width="42" height="42"/>
+  <rect class="fg" x="484" y="706" width="42" height="70"/>
+  <rect class="fg" x="554" y="744" width="42" height="32"/>
+  <rect class="fg" x="624" y="682" width="42" height="94"/>
+  <path class="stroke" d="M700 764 L746 718 L788 738 L828 688" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path class="stroke" d="M810 688 L828 688 L828 706" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>

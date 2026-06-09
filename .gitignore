@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Legacy repo-local runtime folders. New runtime data uses OS app directories.
+user/
+var/

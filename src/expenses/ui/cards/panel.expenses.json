@@ -1,0 +1,14 @@
+{
+  "id": "panel.expenses",
+  "widget": "ExpensesOverviewWidget",
+  "title": "Expense Manager",
+  "subtitle": "Realtime spend signals and synced ledger status",
+  "datasource": { "file": "expenses.json" },
+  "refresh": {
+    "mode": "interval",
+    "seconds": 600,
+    "job": "expenses.refresh",
+    "reload": "widget",
+    "async": true
+  }
+}

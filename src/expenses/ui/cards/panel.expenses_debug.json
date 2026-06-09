@@ -1,0 +1,9 @@
+{
+  "id": "panel.expenses_debug",
+  "widget": "ExpensesMailDebugWidget",
+  "title": "Mail Debug",
+  "subtitle": "Inspect stored candidate emails, parse failures, and the raw bank-rule config.",
+  "visibility": {
+    "defaultVisible": false
+  }
+}

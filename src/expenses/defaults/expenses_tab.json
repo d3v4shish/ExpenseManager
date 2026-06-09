@@ -1,0 +1,30 @@
+{
+  "filters": {
+    "availableYears": [],
+    "availableMonths": [
+      { "value": 0, "label": "All Months" }
+    ],
+    "defaultYear": 0,
+    "defaultMonth": 0
+  },
+  "accounts": [],
+  "transactions": [],
+  "yearlySeries": [],
+  "vendorSummary": [],
+  "recurringPatterns": [],
+  "yearlyAnalysis": [],
+  "meta": {
+    "visibleTransactionCount": 0,
+    "ignoredTransactionCount": 0,
+    "availableAccountCount": 0,
+    "recurringPatternCount": 0,
+    "rebuildProgress": {
+      "running": false,
+      "label": "Ready",
+      "processed": 0,
+      "total": 0,
+      "percent": 0,
+      "providerId": ""
+    }
+  }
+}

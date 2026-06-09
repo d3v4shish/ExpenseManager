@@ -1,0 +1,16 @@
+{
+  "id": "panel.expenses_config",
+  "widget": "ExpensesConfigWidget",
+  "title": "Expense Mail Config",
+  "subtitle": "Select the Thunderbird account that backs the active expense ledger.",
+  "datasource": {
+    "files": [
+      "email_accounts.json",
+      "thunderbird.json",
+      "expenses.json"
+    ]
+  },
+  "visibility": {
+    "defaultVisible": false
+  }
+}

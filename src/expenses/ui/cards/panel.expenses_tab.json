@@ -1,0 +1,14 @@
+{
+  "id": "panel.expenses_tab",
+  "widget": "ExpensesAnalysisWidget",
+  "title": "Ledger Analysis",
+  "subtitle": "Filters, vendor intelligence, recurring patterns, and month-scoped history.",
+  "datasource": { "file": "expenses_tab.json" },
+  "refresh": {
+    "mode": "interval",
+    "seconds": 600,
+    "job": "expenses.refresh",
+    "reload": "widget",
+    "async": true
+  }
+}

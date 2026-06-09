@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Expense Manager light mode app icon">
+  <defs>
+    <style>
+      .bg { fill: #f2efe6; }
+      .paper { fill: none; stroke: #000000; }
+      .paper-fill { fill: #000000; }
+      .shade { fill: #8a867b; stroke: #8a867b; }
+      .accent { fill: none; stroke: #000000; }
+      .accent-fill { fill: #000000; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="96" y="96" width="832" height="832"/>
+  <rect class="paper" x="146" y="146" width="732" height="732" stroke-width="18"/>
+
+  <rect class="shade" x="258" y="218" width="508" height="588"/>
+  <rect class="paper" x="258" y="218" width="508" height="588" stroke-width="34"/>
+  <line class="paper" x1="258" y1="330" x2="766" y2="330" stroke-width="30"/>
+  <line class="shade" x1="390" y1="330" x2="390" y2="806" stroke-width="20"/>
+  <line class="shade" x1="612" y1="330" x2="612" y2="806" stroke-width="20"/>
+
+  <rect class="shade" x="302" y="414" width="56" height="26"/>
+  <rect class="paper-fill" x="430" y="414" width="146" height="26"/>
+  <rect class="paper-fill" x="650" y="414" width="74" height="26"/>
+  <rect class="shade" x="302" y="544" width="56" height="26"/>
+  <rect class="shade" x="430" y="544" width="120" height="26"/>
+  <rect class="paper-fill" x="650" y="544" width="92" height="26"/>
+
+  <path class="accent" d="M316 708 L462 626 L572 674 L716 520" stroke-width="46" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path class="accent" d="M686 520 L716 520 L716 550" stroke-width="46" stroke-linecap="square" stroke-linejoin="miter"/>
+  <rect class="accent-fill" x="302" y="256" width="58" height="36"/>
+</svg>
