@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sys
 from typing import Any
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QTimer, pyqtSignal
@@ -53,6 +54,8 @@ class ExpensesConfigWidget(BaseWidget):
         super().__init__(widget_config, widget_data, theme, screen_api, window_api, parent)
         self.snapshot = self.screen_api.get_expense_mail_config_snapshot()
         self.discovery_running = False
+        self.profile_search_running = False
+        self._discovery_request_id = 0
         self.save_running = False
         self.expenses_job_running = False
         self.expenses_job_label = ""
@@ -61,6 +64,7 @@ class ExpensesConfigWidget(BaseWidget):
         self.inline_message = ""
         self.inline_tone = "muted"
         self.accounts: list[dict[str, Any]] = []
+        self._compact_form = False
         self._build_ui()
         self._load_snapshot_fields(preserve_dirty=False)
         self._refresh_view_state()
@@ -168,9 +172,9 @@ class ExpensesConfigWidget(BaseWidget):
         form_layout.setHorizontalSpacing(6)
         form_layout.setVerticalSpacing(4)
 
-        profile_label = self._make_field_label("Thunderbird Profile")
+        self.profile_label = self._make_field_label("Thunderbird Profile")
         self.profile_input = QLineEdit()
-        self.profile_input.setPlaceholderText(r"C:\Users\<you>\AppData\Roaming\Thunderbird\Profiles\...")
+        self.profile_input.setPlaceholderText(self._profile_placeholder())
         self.profile_input.textChanged.connect(self._handle_profile_text_changed)
 
         self.browse_button = make_button(
@@ -183,36 +187,26 @@ class ExpensesConfigWidget(BaseWidget):
         self._compact_button(self.browse_button)
 
         self.reload_button = make_button(
-            "Reload Accounts",
+            "Find Profiles",
             self.theme.hex("divider", self.theme.hex("border")),
             self.theme.hex("text_primary"),
             self.theme.hex("surface_panel_alt"),
         )
-        self.reload_button.setToolTip("Inspect the selected Thunderbird profile and list usable IMAP accounts.")
-        self.reload_button.clicked.connect(self._start_discovery)
+        self.reload_button.setToolTip("Search known Thunderbird locations under /home and select the first usable profile.")
+        self.reload_button.clicked.connect(self._start_profile_search)
         self._compact_button(self.reload_button)
 
-        account_label = self._make_field_label("Expense Account")
+        self.account_label = self._make_field_label("Expense Account")
         self.account_combo = QComboBox()
         self.account_combo.currentIndexChanged.connect(self._handle_account_changed)
 
-        mailbox_label = self._make_field_label("Resolved Mailbox")
+        self.mailbox_label = self._make_field_label("Resolved Mailbox")
         self.mailbox_value = QLineEdit()
         self.mailbox_value.setReadOnly(True)
         self.mailbox_value.setPlaceholderText("No mailbox selected.")
 
-        form_layout.addWidget(profile_label, 0, 0)
-        form_layout.addWidget(self.profile_input, 0, 1)
-        form_layout.addWidget(self.browse_button, 0, 2)
-        form_layout.addWidget(self.reload_button, 0, 3)
-        form_layout.addWidget(account_label, 1, 0)
-        form_layout.addWidget(self.account_combo, 1, 1)
-        form_layout.addWidget(mailbox_label, 1, 2)
-        form_layout.addWidget(self.mailbox_value, 1, 3)
-        form_layout.setColumnStretch(1, 1)
-        form_layout.setColumnStretch(3, 1)
-        form_layout.setColumnMinimumWidth(0, 132)
-        form_layout.setColumnMinimumWidth(2, 124)
+        self.form_layout = form_layout
+        self._reflow_form()
         body_layout.addWidget(form)
 
         self.banner = QLabel()
@@ -309,6 +303,59 @@ class ExpensesConfigWidget(BaseWidget):
         self.card.add_content_widget(body)
         self.root.addWidget(self.card)
 
+    @staticmethod
+    def _profile_placeholder() -> str:
+        """Return an example Thunderbird profile path for the current platform."""
+
+        if sys.platform == "darwin":
+            return "~/Library/Thunderbird/Profiles/..."
+        if sys.platform.startswith("win"):
+            return r"C:\Users\<you>\AppData\Roaming\Thunderbird\Profiles\..."
+        return "~/.thunderbird/..."
+
+    def _reflow_form(self) -> None:
+        """Keep setup fields usable in a narrow card without horizontal clipping."""
+
+        compact = self.width() > 0 and self.width() < 760
+        if compact == self._compact_form and self.form_layout.count():
+            return
+        self._compact_form = compact
+        form = self.form_layout
+        for column in range(4):
+            form.setColumnMinimumWidth(column, 0)
+            form.setColumnStretch(column, 0)
+        if compact:
+            form.addWidget(self.profile_label, 0, 0)
+            form.addWidget(self.profile_input, 0, 1, 1, 3)
+            form.addWidget(self.browse_button, 1, 1)
+            form.addWidget(self.reload_button, 1, 2)
+            form.addWidget(self.account_label, 2, 0)
+            form.addWidget(self.account_combo, 2, 1, 1, 3)
+            form.addWidget(self.mailbox_label, 3, 0)
+            form.addWidget(self.mailbox_value, 3, 1, 1, 3)
+            form.setColumnStretch(1, 1)
+            form.setColumnStretch(3, 1)
+        else:
+            form.addWidget(self.profile_label, 0, 0)
+            form.addWidget(self.profile_input, 0, 1)
+            form.addWidget(self.browse_button, 0, 2)
+            form.addWidget(self.reload_button, 0, 3)
+            form.addWidget(self.account_label, 1, 0)
+            form.addWidget(self.account_combo, 1, 1)
+            form.addWidget(self.mailbox_label, 1, 2)
+            form.addWidget(self.mailbox_value, 1, 3)
+            form.setColumnStretch(1, 1)
+            form.setColumnStretch(3, 1)
+            form.setColumnMinimumWidth(0, 132)
+            form.setColumnMinimumWidth(2, 124)
+        form.invalidate()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Reflow account setup when the window crosses the compact breakpoint."""
+
+        self._reflow_form()
+        super().resizeEvent(event)
+
     def _make_field_label(self, text: str, row_span: int = 1, column_span: int = 1):
         """Create one compact uppercase field label."""
 
@@ -342,23 +389,29 @@ class ExpensesConfigWidget(BaseWidget):
         )
 
     def _auto_discover_from_snapshot(self) -> None:
-        """Discover accounts on first paint when a profile path already exists."""
+        """Discover a saved profile or search known local profile locations."""
 
         if not self.is_card_visible():
             return
-        if self.discovery_running or self.accounts or not self.profile_input.text().strip():
+        if self.discovery_running or self.profile_search_running or self.accounts:
             return
-        self._start_discovery()
+        if self.profile_input.text().strip():
+            self._start_discovery()
+            return
+        self._start_profile_search()
 
     def _handle_profile_text_changed(self) -> None:
         """Refresh UI affordances when the profile path changes."""
 
         self.discovery_error = ""
+        self._discovery_request_id += 1
         self.accounts = []
         self._populate_accounts([], preferred_email="")
         if not self.profile_input.text().strip():
             self.inline_message = ""
         self._refresh_view_state()
+        if self.profile_input.text().strip() and self.is_card_visible():
+            QTimer.singleShot(350, self._start_discovery)
 
     def _handle_account_changed(self) -> None:
         """Refresh the mailbox preview and DB summary when selection changes."""
@@ -378,7 +431,7 @@ class ExpensesConfigWidget(BaseWidget):
     def _start_discovery(self) -> None:
         """Run Thunderbird account discovery in the background."""
 
-        if self.discovery_running or self.save_running:
+        if self.save_running or self.profile_search_running:
             return
         profile_path = self.profile_input.text().strip()
         if not profile_path:
@@ -389,18 +442,68 @@ class ExpensesConfigWidget(BaseWidget):
             self._refresh_view_state()
             return
         self.discovery_running = True
+        self._discovery_request_id += 1
+        request_id = self._discovery_request_id
         self.discovery_error = ""
         self.inline_message = ""
         self.discovery_warnings = []
         self._refresh_view_state()
         worker = _TaskWorker(self.screen_api.discover_thunderbird_accounts, profile_path)
-        worker.signals.finished.connect(self._handle_discovery_success)
-        worker.signals.failed.connect(self._handle_discovery_failed)
+        worker.signals.finished.connect(lambda result, token=request_id, profile=profile_path: self._handle_discovery_success(token, profile, result))
+        worker.signals.failed.connect(lambda message, token=request_id: self._handle_discovery_failed(token, message))
         self.window_api.thread_pool.start(worker)
 
-    def _handle_discovery_success(self, result: object) -> None:
+    def _start_profile_search(self) -> None:
+        """Search known Thunderbird roots under /home without scanning email content."""
+
+        if self.save_running or self.profile_search_running or self.discovery_running:
+            return
+        finder = getattr(self.screen_api, "discover_default_thunderbird_profiles", None)
+        if not callable(finder):
+            self.discovery_error = "Automatic Thunderbird profile search is unavailable."
+            self._refresh_view_state()
+            return
+        self.profile_search_running = True
+        self.discovery_error = ""
+        self.inline_message = ""
+        self._refresh_view_state()
+        worker = _TaskWorker(finder)
+        worker.signals.finished.connect(self._handle_profile_search_success)
+        worker.signals.failed.connect(self._handle_profile_search_failed)
+        self.window_api.thread_pool.start(worker)
+
+    def _handle_profile_search_success(self, result: object) -> None:
+        """Select the first usable discovered profile and inspect its accounts."""
+
+        self.profile_search_running = False
+        profiles = [dict(item) for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+        usable = [item for item in profiles if str(item.get("profilePath", "")).strip() and item.get("accounts")]
+        if not usable:
+            self.inline_message = "No usable Thunderbird IMAP profile was found in known /home locations."
+            self.inline_tone = "warning"
+            self._refresh_view_state()
+            return
+        selected = usable[0]
+        profile_path = str(selected.get("profilePath", "")).strip()
+        self.profile_input.blockSignals(True)
+        self.profile_input.setText(profile_path)
+        self.profile_input.blockSignals(False)
+        self.inline_message = f"Found {len(usable):,} usable profile(s); inspecting {profile_path}."
+        self.inline_tone = "success"
+        self._start_discovery()
+
+    def _handle_profile_search_failed(self, message: str) -> None:
+        """Surface profile-search failures without preventing manual selection."""
+
+        self.profile_search_running = False
+        self.discovery_error = str(message or "Could not search for Thunderbird profiles.")
+        self._refresh_view_state()
+
+    def _handle_discovery_success(self, request_id: int, profile_path: str, result: object) -> None:
         """Apply one completed discovery result."""
 
+        if request_id != self._discovery_request_id or profile_path != self.profile_input.text().strip():
+            return
         self.discovery_running = False
         payload = dict(result) if isinstance(result, dict) else {}
         self.discovery_error = ""
@@ -418,9 +521,11 @@ class ExpensesConfigWidget(BaseWidget):
             self.inline_message = ""
         self._refresh_view_state()
 
-    def _handle_discovery_failed(self, message: str) -> None:
+    def _handle_discovery_failed(self, request_id: int, message: str) -> None:
         """Apply one failed discovery result."""
 
+        if request_id != self._discovery_request_id:
+            return
         self.discovery_running = False
         self.discovery_error = str(message or "Thunderbird account discovery failed.")
         self.discovery_warnings = []
@@ -614,21 +719,22 @@ class ExpensesConfigWidget(BaseWidget):
         self.db_checkpoint_value.setText(self._format_timestamp(str(db_status.get("lastReceivedAt", "")).strip()))
         self.db_path_value.setText(str(db_status.get("dbPath", "")).strip() or "No account DB selected.")
 
+        busy = self.discovery_running or self.profile_search_running
         save_enabled = (
-            not self.discovery_running
+            not busy
             and not self.save_running
             and not self.expenses_job_running
             and bool(self.profile_input.text().strip())
             and bool(self._selected_account_email())
             and self._has_unsaved_changes()
         )
-        primary_enabled = not self.discovery_running and not self.save_running and not self.expenses_job_running and not self._has_unsaved_changes()
+        primary_enabled = not busy and not self.save_running and not self.expenses_job_running and not self._has_unsaved_changes()
         self.save_button.setEnabled(save_enabled)
         self.primary_action_button.setEnabled(primary_enabled)
-        self.advanced_button.setEnabled(not self.discovery_running and not self.save_running)
+        self.advanced_button.setEnabled(not busy and not self.save_running)
         self.profile_input.setEnabled(not self.save_running and not self.expenses_job_running)
         self.account_combo.setEnabled(not self.save_running and not self.expenses_job_running and (self.account_combo.count() > 0))
-        self.reload_button.setEnabled(not self.save_running and bool(self.profile_input.text().strip()))
+        self.reload_button.setEnabled(not self.save_running and not self.expenses_job_running and not busy)
         self.browse_button.setEnabled(not self.save_running and not self.expenses_job_running)
         advanced_visible = self.is_card_visible("panel.expenses_debug")
         self.db_frame.setVisible(advanced_visible)
@@ -652,6 +758,8 @@ class ExpensesConfigWidget(BaseWidget):
 
         if self.save_running:
             return "Saving account and switching the ledger...", "info"
+        if self.profile_search_running:
+            return "Searching known Thunderbird profile locations under /home...", "info"
         if self.discovery_running:
             return "Inspecting the Thunderbird profile...", "info"
         if self.discovery_error:
@@ -663,9 +771,9 @@ class ExpensesConfigWidget(BaseWidget):
         if self.discovery_warnings:
             return self.discovery_warnings[0], "warning"
         if not self.profile_input.text().strip():
-            return "Select a Thunderbird profile.", "muted"
+            return "Search /home for Thunderbird profiles or select one manually.", "muted"
         if self.account_combo.count() == 0:
-            return "Reload accounts.", "muted"
+            return "No usable account was found in this profile.", "muted"
         if self._has_unsaved_changes():
             return "Save to switch the active ledger.", "warning"
         source_validation = self.snapshot.get("sourceValidation", {}) if isinstance(self.snapshot.get("sourceValidation", {}), dict) else {}

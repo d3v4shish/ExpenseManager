@@ -6,10 +6,13 @@ from src.app.logging_utils import configure_app_logging
 from src.app.window import run_app_window
 from src.expenses.bootstrap import build_runtime
 from src.expenses.ui import (
+    ExpenseInsightsWidget,
+    ExpenseSettingsWidget,
     ExpensesAnalysisWidget,
     ExpensesConfigWidget,
     ExpensesMailDebugWidget,
     ExpensesOverviewWidget,
+    ExpensesSourcesWidget,
     ExpensesScreenApi,
 )
 
@@ -25,7 +28,11 @@ def run() -> int:
         expenses_repository=runtime.repositories["expenses"],
         vendor_catalog_service=runtime.services["vendor_catalog"],
         bank_rule_catalog=runtime.services["bank_rule_catalog"],
+        template_mining_service=runtime.services["template_mining"],
         mail_ingestion_service=runtime.services["mail_ingestion"],
+        analytics_service=runtime.services["analytics"],
+        settings_service=runtime.services["settings"],
+        data_management_service=runtime.services["data_management"],
         files=runtime.files,
     )
     return run_app_window(
@@ -37,7 +44,15 @@ def run() -> int:
             "ExpensesConfigWidget": ExpensesConfigWidget,
             "ExpensesMailDebugWidget": ExpensesMailDebugWidget,
             "ExpensesOverviewWidget": ExpensesOverviewWidget,
+            "ExpensesSourcesWidget": ExpensesSourcesWidget,
+            "ExpenseInsightsWidget": ExpenseInsightsWidget,
+            "ExpenseSettingsWidget": ExpenseSettingsWidget,
         },
-        card_ids=("panel.expenses", "panel.expenses_config", "panel.expenses_debug", "panel.expenses_tab"),
-        tab_targets={"expenses_tab": "panel.expenses_tab"},
+        card_ids=(
+            "panel.expenses",
+            "panel.expense_insights",
+            "panel.expenses_debug",
+            "panel.expenses_tab",
+        ),
+        tab_targets={"expenses_tab": "panel.expenses_tab", "insights": "panel.expense_insights"},
     )

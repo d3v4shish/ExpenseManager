@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable
@@ -14,7 +16,8 @@ from src.expenses.services.vendor_catalog import VendorCatalogService
 
 
 class ExpensesService:
-    MATERIALIZATION_VERSION = "2026-04-18-expenses-candidate-mail-v2"
+    MATERIALIZATION_VERSION = "2026-09-13-reconciliation-v1"
+    VENDOR_DIRECTORY_LIMIT = 1_000
 
     def __init__(
         self,
@@ -29,26 +32,39 @@ class ExpensesService:
         self.mail_ingestion_service = mail_ingestion_service
         self.vendor_catalog_service = vendor_catalog_service
         self.progress_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._fact_transaction_keys: dict[int, str] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def refresh_expenses(self) -> None:
-        if self.expenses_repository.count_source_records() <= 0:
-            self._write_views(force_rebuild=False)
-            return
-        self._materialize_expenses(force_rebuild=False)
+    def refresh_expenses(self, *, is_cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        return self._materialize_expenses(force_rebuild=False, is_cancelled=is_cancelled)
 
-    def rebuild_expenses(self) -> None:
-        self._materialize_expenses(force_rebuild=True)
+    def rebuild_expenses(self, *, is_cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        return self._materialize_expenses(force_rebuild=True, is_cancelled=is_cancelled)
 
     def refresh_views_from_repository(self) -> None:
         self._write_views(force_rebuild=False)
 
+    def build_overview_snapshot(self) -> dict[str, Any]:
+        """Return the current overview payload for GUI and headless reports."""
+
+        return self._build_overview_payload(
+            self.expenses_repository.list_transactions(include_ignored=True),
+            force_rebuild=False,
+        )
+
     def reparse_candidate_mails(self) -> dict[str, Any]:
         """Re-run parsing for every stored candidate email and refresh derived views."""
 
-        report = self.mail_ingestion_service.reparse_stored_email_records(lambda _record: True)
-        transactions = self._materialize_transactions(self.expenses_repository.list_facts("bank_transaction"))
+        return self.reparse_source_records()
+
+    def reparse_source_records(self) -> dict[str, Any]:
+        """Re-run parsers for all retained source records and refresh derived views."""
+
+        report = self.mail_ingestion_service.reparse_stored_source_records(lambda _record: True)
+        facts = self.expenses_repository.list_facts("bank_transaction")
+        transactions = self._materialize_transactions(facts)
         self.expenses_repository.replace_transactions(transactions)
+        self._refresh_transaction_provenance(facts)
         self.expenses_repository.set_metadata("expenses_materialization_version", self.MATERIALIZATION_VERSION)
         self._write_views(force_rebuild=False)
         return {
@@ -89,6 +105,94 @@ class ExpensesService:
         self.expenses_repository.set_ignored(transaction_key, ignored)
         self._write_views(force_rebuild=False)
 
+    def resolve_duplicate_candidate(self, candidate_key: str, decision: str) -> dict[str, Any]:
+        """Persist a duplicate decision and immediately rematerialize its local ledger."""
+
+        self.expenses_repository.resolve_duplicate_candidate(candidate_key, decision)
+        facts = self.expenses_repository.list_facts("bank_transaction")
+        transactions = self._materialize_transactions(facts)
+        self.expenses_repository.replace_transactions(transactions)
+        self._refresh_transaction_provenance(facts)
+        self._write_views(force_rebuild=False)
+        return {"candidateKey": candidate_key, "decision": decision, "transactionCount": len({row["transactionKey"] for row in transactions})}
+
+    def list_reconciliation_conflicts(self, *, status: str = "") -> list[dict[str, Any]]:
+        """Return exact-identity conflicts retained for source reconciliation review."""
+
+        return self.expenses_repository.list_reconciliation_conflicts(status=status)
+
+    def get_reconciliation_policy(self) -> dict[str, Any]:
+        """Return the active exact-identity conflict policy for GUI and CLI."""
+
+        return self._reconciliation_policy()
+
+    def resolve_reconciliation_conflict(self, reconciliation_key: str, selected_signature: str) -> dict[str, Any]:
+        """Apply one explicit source-value choice and rebuild the local ledger."""
+
+        self.expenses_repository.resolve_reconciliation_conflict(reconciliation_key, selected_signature)
+        return self.reconcile_source_transactions()
+
+    def set_reconciliation_policy(self, mode: str, *, preferred_provider_id: str = "") -> dict[str, Any]:
+        """Persist the opt-in exact-conflict policy and rematerialize local facts."""
+
+        normalized_mode = str(mode).strip().lower()
+        if normalized_mode not in {"manual", "provider_priority"}:
+            raise ValueError("Reconciliation policy must be manual or provider_priority.")
+        store = self.mail_ingestion_service.config_store
+        try:
+            config = store.load_user("email_accounts.json")
+        except FileNotFoundError:
+            config = {"providers": []}
+        reconciliation = dict(config.get("reconciliation", {})) if isinstance(config.get("reconciliation", {}), dict) else {}
+        priority = [str(value).strip() for value in reconciliation.get("providerPriority", []) if str(value).strip()]
+        preferred = str(preferred_provider_id).strip()
+        if preferred:
+            configured = {
+                str(item.get("id", "")).strip()
+                for item in config.get("providers", [])
+                if isinstance(item, dict)
+            }
+            if preferred not in configured:
+                raise ValueError(f"Provider '{preferred}' is not configured.")
+            priority = [preferred, *[item for item in priority if item != preferred]]
+        store.save_user(
+            "email_accounts.json",
+            {
+                **config,
+                "reconciliation": {
+                    **reconciliation,
+                    "exactConflictPolicy": normalized_mode,
+                    "providerPriority": priority,
+                },
+            },
+        )
+        return {**self.reconcile_source_transactions(), "policy": self._reconciliation_policy()}
+
+    def reconcile_source_transactions(self) -> dict[str, Any]:
+        """Re-materialize stored facts after a reconciliation choice or policy change."""
+
+        facts = self.expenses_repository.list_facts("bank_transaction")
+        transactions = self._materialize_transactions(facts)
+        self.expenses_repository.replace_transactions(transactions)
+        self._refresh_transaction_provenance(facts)
+        self.expenses_repository.set_metadata("expenses_materialization_version", self.MATERIALIZATION_VERSION)
+        self._write_views(force_rebuild=False)
+        return {
+            "transactionCount": len({row["transactionKey"] for row in transactions}),
+            "conflicts": len(self.expenses_repository.list_reconciliation_conflicts()),
+        }
+
+    def delete_source_data(self, provider_id: str) -> dict[str, Any]:
+        """Remove one provider's retained records and rebuild the ledger from survivors."""
+
+        deleted_records = self.expenses_repository.delete_source_records(provider_id)
+        facts = self.expenses_repository.list_facts("bank_transaction")
+        transactions = self._materialize_transactions(facts)
+        self.expenses_repository.replace_transactions(transactions)
+        self._refresh_transaction_provenance(facts)
+        self._write_views(force_rebuild=False)
+        return {"providerId": str(provider_id), "deletedSourceRecords": deleted_records, "transactionCount": len({row["transactionKey"] for row in transactions})}
+
     def reconcile_vendor_mappings(self) -> dict[str, Any]:
         """Re-apply vendor catalog matching to every stored transaction immediately."""
 
@@ -101,10 +205,18 @@ class ExpensesService:
                 "updatedAt": datetime.now().astimezone().isoformat(),
             }
 
+        raw_values = [self._vendor_resolution_value(row) for row in rows]
+        batch_resolver = getattr(self.vendor_catalog_service, "resolve_vendors", None)
+        resolved_by_raw = batch_resolver(raw_values) if callable(batch_resolver) else {}
         reconciled_rows: list[dict[str, Any]] = []
         changed_rows = 0
         for row in rows:
-            updated = self._reconcile_vendor_row(row)
+            raw_value = self._vendor_resolution_value(row)
+            updated = self._reconcile_vendor_row(
+                row,
+                resolved=resolved_by_raw.get(raw_value),
+                catalog_checked=callable(batch_resolver),
+            )
             if self._vendor_mapping_changed(row, updated):
                 changed_rows += 1
             reconciled_rows.append(updated)
@@ -170,40 +282,93 @@ class ExpensesService:
             "reconcile": reconcile_report,
         }
 
-    def _materialize_expenses(self, *, force_rebuild: bool) -> None:
+    def _materialize_expenses(self, *, force_rebuild: bool, is_cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         if force_rebuild:
             self._write_rebuild_progress(self._scan_progress(force_full=True))
-            ingest_report = self.mail_ingestion_service.rebuild_email_records(progress_callback=self._handle_rebuild_progress)
+            ingest_report = self.mail_ingestion_service.rebuild_source_records(progress_callback=self._handle_rebuild_progress, is_cancelled=is_cancelled)
         else:
-            ingest_report = self.mail_ingestion_service.refresh_email_records(progress_callback=self._handle_rebuild_progress)
+            ingest_report = self.mail_ingestion_service.refresh_source_records(progress_callback=self._handle_rebuild_progress, is_cancelled=is_cancelled)
+
+        if bool(ingest_report.get("cancelled")):
+            self._write_rebuild_progress(self._idle_progress())
+            return {**ingest_report, "materialized": False, "reason": "cancelled"}
 
         current_version = self.expenses_repository.get_metadata("expenses_materialization_version")
         changed_records = int(ingest_report.get("changedRecords", 0) or 0)
-        needs_materialize = force_rebuild or changed_records > 0 or current_version != self.MATERIALIZATION_VERSION
+        removed_records = int(ingest_report.get("removedRecords", 0) or 0)
+        needs_materialize = (
+            force_rebuild
+            or changed_records > 0
+            or removed_records > 0
+            or current_version != self.MATERIALIZATION_VERSION
+        )
         if not needs_materialize:
             self._write_rebuild_progress(self._idle_progress())
-            return
+            return {**ingest_report, "materialized": False, "reason": "no_source_changes"}
 
         self._write_rebuild_progress(self._analytics_progress(force_full=force_rebuild, ingest_report=ingest_report))
-        transactions = self._materialize_transactions(self.expenses_repository.list_facts("bank_transaction"))
-        prune_missing = force_rebuild or current_version != self.MATERIALIZATION_VERSION
+        facts = self.expenses_repository.list_facts("bank_transaction")
+        transactions = self._materialize_transactions(facts)
+        prune_missing = force_rebuild or removed_records > 0 or current_version != self.MATERIALIZATION_VERSION
         self.expenses_repository.upsert_transactions(transactions, prune_missing=prune_missing)
+        self._refresh_transaction_provenance(facts)
         self.expenses_repository.set_metadata("expenses_materialization_version", self.MATERIALIZATION_VERSION)
         self._write_views(force_rebuild=force_rebuild)
         self._write_rebuild_progress(self._idle_progress())
+        return {**ingest_report, "materialized": True, "transactionCount": len(transactions)}
+
+    def _refresh_transaction_provenance(self, facts: list[dict[str, Any]]) -> None:
+        links: list[tuple[str, int, str]] = []
+        for fact in facts:
+            source_record_id = int(fact.get("sourceRecordId", 0) or 0)
+            if source_record_id <= 0:
+                continue
+            payload = fact.get("payload", {}) if isinstance(fact.get("payload"), dict) else {}
+            kind = "strong" if str(payload.get("transactionId", "")).strip() else "source"
+            transaction_key = self._fact_transaction_keys.get(source_record_id)
+            if not transaction_key:
+                transaction_key = self._canonical_transaction_key(fact)
+            links.append((transaction_key, source_record_id, kind))
+        self.expenses_repository.replace_transaction_sources(links)
+        self.expenses_repository.refresh_duplicate_candidates()
 
     def _materialize_transactions(self, bank_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = []
+        """Build one auditable ledger row per exact source identity.
+
+        Sources that agree on the bank/reference/time identity consolidate into one
+        row and retain every source record as provenance.  Sources that disagree
+        on the financial values remain one provisional row until either the user
+        picks a value or an explicit provider-priority policy picks it.
+        """
+
+        self._fact_transaction_keys = {}
+        batch_resolver = getattr(self.vendor_catalog_service, "resolve_vendors", None)
+        raw_values = [
+            str(payload.get("counterparty", "")).strip()
+            for fact in bank_facts
+            for payload in [fact.get("payload", {})]
+            if isinstance(payload, dict)
+        ]
+        resolved_by_raw = batch_resolver(raw_values) if callable(batch_resolver) else {}
+        rows: list[dict[str, Any]] = []
         for fact in bank_facts:
-            payload   = fact.get("payload", {})
+            payload = fact.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
             stamp     = self._transaction_dt(payload) or self._transaction_dt(fact)
             amount    = self._amount(payload)
             direction = str(payload.get("direction", "")).strip().lower()
             if stamp is None or amount is None or direction not in {"debit", "credit"}:
                 continue
             raw_counterparty = str(payload.get("counterparty", "")).strip()
-            vendor_info      = self._resolve_vendor(raw_counterparty, direction, payload)
-            result.append(
+            vendor_info      = self._resolve_vendor(
+                raw_counterparty,
+                direction,
+                payload,
+                resolved=resolved_by_raw.get(raw_counterparty),
+                catalog_checked=callable(batch_resolver),
+            )
+            rows.append(
                 {
                     "transactionKey": self._transaction_key(fact),
                     "providerId": str(fact.get("providerId", "")).strip(),
@@ -229,12 +394,213 @@ class ExpensesService:
                     "month": stamp.month,
                     "title": str(fact.get("title", "")).strip(),
                     "sender": str(fact.get("sender", "")).strip(),
+                    "_sourceRecordId": int(fact.get("sourceRecordId", 0) or 0),
                 }
             )
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        fallback_rows: list[dict[str, Any]] = []
+        for row in rows:
+            reconciliation_key = self._exact_reconciliation_key(row)
+            if reconciliation_key:
+                grouped[reconciliation_key].append(row)
+            else:
+                fallback_rows.append(row)
+
+        policy = self._reconciliation_policy()
+        priority = {provider_id: index for index, provider_id in enumerate(policy["providerPriority"])}
+        existing_conflicts = {
+            str(item.get("reconciliationKey", "")): item
+            for item in self.expenses_repository.list_reconciliation_conflicts()
+        }
+        result: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        for reconciliation_key, candidates in grouped.items():
+            by_signature: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for candidate in candidates:
+                by_signature[self._reconciliation_signature(candidate)].append(candidate)
+
+            ordered_signatures = sorted(
+                by_signature,
+                key=lambda signature: self._reconciliation_candidate_sort_key(by_signature[signature][0], priority),
+            )
+            selected_signature = ordered_signatures[0]
+            status = "exact"
+            resolution_mode = "exact"
+            if len(by_signature) > 1:
+                existing = existing_conflicts.get(reconciliation_key)
+                persisted_selection = str((existing or {}).get("selectedSignature", "")).strip()
+                if str((existing or {}).get("status", "")) == "user_resolved" and persisted_selection in by_signature:
+                    selected_signature = persisted_selection
+                    status = "user_resolved"
+                    resolution_mode = "manual"
+                elif policy["exactConflictPolicy"] == "provider_priority":
+                    status = "auto_resolved"
+                    resolution_mode = "provider_priority"
+                else:
+                    status = "needs_review"
+                    resolution_mode = "manual"
+
+                conflicts.append(
+                    self._reconciliation_conflict_payload(
+                        reconciliation_key,
+                        by_signature,
+                        selected_signature,
+                        status,
+                        resolution_mode,
+                    )
+                )
+
+            selected = by_signature[selected_signature][0]
+            transaction_key = self._canonical_duplicate_transaction_key(reconciliation_key)
+            selected = {
+                **selected,
+                "transactionKey": transaction_key,
+                "reconciliationKey": reconciliation_key,
+                "reconciliationStatus": status,
+            }
+            result.append(selected)
+            for candidate in candidates:
+                source_record_id = int(candidate.get("_sourceRecordId", 0) or 0)
+                if source_record_id > 0:
+                    self._fact_transaction_keys[source_record_id] = transaction_key
+
+        for row in fallback_rows:
+            transaction_key = self._canonical_duplicate_transaction_key(str(row["transactionKey"]))
+            source_record_id = int(row.get("_sourceRecordId", 0) or 0)
+            if source_record_id > 0:
+                self._fact_transaction_keys[source_record_id] = transaction_key
+            result.append(
+                {
+                    **row,
+                    "transactionKey": transaction_key,
+                    "reconciliationKey": "",
+                    "reconciliationStatus": "exact",
+                }
+            )
+
+        self.expenses_repository.sync_reconciliation_conflicts(conflicts)
+        for row in result:
+            row.pop("_sourceRecordId", None)
         result.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
         return result
 
-    def _resolve_vendor(self, raw_counterparty: str, direction: str, payload: dict[str, Any]) -> dict[str, str]:
+    def _reconciliation_policy(self) -> dict[str, Any]:
+        """Return the explicit policy; manual review is the safe default."""
+
+        try:
+            config = self.mail_ingestion_service.config_store.load_user("email_accounts.json")
+        except FileNotFoundError:
+            config = {"providers": []}
+        reconciliation = config.get("reconciliation", {}) if isinstance(config, dict) else {}
+        reconciliation = reconciliation if isinstance(reconciliation, dict) else {}
+        mode = str(reconciliation.get("exactConflictPolicy", "manual")).strip().lower()
+        if mode not in {"manual", "provider_priority"}:
+            mode = "manual"
+        configured_ids = [
+            str(item.get("id", "")).strip()
+            for item in config.get("providers", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        ]
+        requested = [
+            str(value).strip()
+            for value in reconciliation.get("providerPriority", [])
+            if str(value).strip() in configured_ids
+        ]
+        priority: list[str] = []
+        for provider_id in [*requested, *configured_ids]:
+            if provider_id not in priority:
+                priority.append(provider_id)
+        return {"exactConflictPolicy": mode, "providerPriority": priority}
+
+    def _exact_reconciliation_key(self, row: dict[str, Any]) -> str:
+        """Return the strong cross-source identity for a referenced transaction."""
+
+        transaction_id = self._key_token(row.get("transactionId"))
+        if not transaction_id:
+            return ""
+        stamp = self._transaction_dt(row)
+        if stamp is None:
+            return ""
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone(timezone.utc)
+        time_token = stamp.replace(second=0, microsecond=0).isoformat()
+        return "|".join(
+            (
+                "txn",
+                self._key_token(row.get("bankName")) or "unknown_bank",
+                self._key_token(row.get("accountSuffix")) or "unknown_account",
+                self._key_token(row.get("direction")) or "unknown_direction",
+                transaction_id,
+                time_token,
+            )
+        )
+
+    def _reconciliation_signature(self, row: dict[str, Any]) -> str:
+        amount = self._amount(row)
+        value = {
+            "amount": f"{amount:.2f}" if amount is not None else "",
+            "currency": str(row.get("currency", "")).strip().upper(),
+            "merchant": self._key_token(row.get("rawCounterparty") or row.get("counterparty")),
+        }
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _reconciliation_candidate_sort_key(row: dict[str, Any], priority: dict[str, int]) -> tuple[int, str, str]:
+        provider_id = str(row.get("providerId", "")).strip()
+        return (
+            priority.get(provider_id, len(priority)),
+            provider_id,
+            str(row.get("externalId", "")).strip(),
+        )
+
+    def _reconciliation_conflict_payload(
+        self,
+        reconciliation_key: str,
+        by_signature: dict[str, list[dict[str, Any]]],
+        selected_signature: str,
+        status: str,
+        resolution_mode: str,
+    ) -> dict[str, Any]:
+        representative = by_signature[selected_signature][0]
+        candidates: list[dict[str, Any]] = []
+        for signature in sorted(by_signature):
+            values = by_signature[signature]
+            sample = values[0]
+            candidates.append(
+                {
+                    "signature": signature,
+                    "amount": sample.get("amount"),
+                    "currency": str(sample.get("currency", "")).strip(),
+                    "merchant": str(sample.get("rawCounterparty") or sample.get("counterparty") or "").strip(),
+                    "providerIds": sorted({str(item.get("providerId", "")).strip() for item in values}),
+                    "externalIds": sorted({str(item.get("externalId", "")).strip() for item in values}),
+                    "sourceRecordIds": sorted({int(item.get("_sourceRecordId", 0) or 0) for item in values if int(item.get("_sourceRecordId", 0) or 0) > 0}),
+                }
+            )
+        return {
+            "reconciliationKey": reconciliation_key,
+            "bankName": str(representative.get("bankName", "")).strip(),
+            "accountSuffix": str(representative.get("accountSuffix", "")).strip(),
+            "direction": str(representative.get("direction", "")).strip(),
+            "transactionId": str(representative.get("transactionId", "")).strip(),
+            "timestamp": str(representative.get("timestamp", "")).strip(),
+            "candidates": candidates,
+            "selectedSignature": selected_signature,
+            "status": status,
+            "resolutionMode": resolution_mode,
+        }
+
+    def _resolve_vendor(
+        self,
+        raw_counterparty: str,
+        direction: str,
+        payload: dict[str, Any],
+        *,
+        resolved: dict[str, Any] | None = None,
+        catalog_checked: bool = False,
+    ) -> dict[str, str]:
         fallback_vendor = raw_counterparty or str(payload.get("bankName", "Unknown")).strip() or "Unknown"
         fallback_display, fallback_cluster = self._fallback_vendor_identity(fallback_vendor)
         fallback_alias_key = fallback_cluster.split(":", 1)[1] if ":" in fallback_cluster else self._normalize_alias_key(fallback_display)
@@ -249,7 +615,8 @@ class ExpensesService:
         }
         if self.vendor_catalog_service is None:
             return fallback
-        resolved = self.vendor_catalog_service.resolve_vendor(raw_counterparty)
+        if resolved is None and not catalog_checked:
+            resolved = self.vendor_catalog_service.resolve_vendor(raw_counterparty)
         if not resolved:
             return fallback
         canonical  = str(resolved.get("canonicalVendor", "")).strip() or fallback_vendor
@@ -267,23 +634,34 @@ class ExpensesService:
             "vendorMatchSource": "vendor_catalog",
         }
 
-    def _reconcile_vendor_row(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _vendor_resolution_value(self, row: dict[str, Any]) -> str:
+        """Return the most useful raw counterparty candidate for catalog matching."""
+
+        for field in ("rawCounterparty", "counterparty", "canonicalVendor", "resolvedVendor", "bankName"):
+            value = str(row.get(field, "")).strip()
+            if value:
+                return value
+        return ""
+
+    def _reconcile_vendor_row(
+        self,
+        row: dict[str, Any],
+        *,
+        resolved: dict[str, Any] | None = None,
+        catalog_checked: bool = False,
+    ) -> dict[str, Any]:
         """Return one transaction row with refreshed vendor mapping fields."""
 
         updated = dict(row)
         direction = str(updated.get("direction", "")).strip().lower()
-        raw_counterparty = str(updated.get("rawCounterparty", "")).strip()
-        if not raw_counterparty:
-            for candidate in (
-                str(updated.get("counterparty", "")).strip(),
-                str(updated.get("canonicalVendor", "")).strip(),
-                str(updated.get("resolvedVendor", "")).strip(),
-                str(updated.get("bankName", "")).strip(),
-            ):
-                if candidate:
-                    raw_counterparty = candidate
-                    break
-        vendor_info = self._resolve_vendor(raw_counterparty, direction, updated)
+        raw_counterparty = self._vendor_resolution_value(updated)
+        vendor_info = self._resolve_vendor(
+            raw_counterparty,
+            direction,
+            updated,
+            resolved=resolved,
+            catalog_checked=catalog_checked,
+        )
         if raw_counterparty:
             updated["rawCounterparty"] = raw_counterparty
         updated["counterparty"] = vendor_info["resolvedVendor"]
@@ -403,6 +781,7 @@ class ExpensesService:
         *,
         year: int | None = None,
         month: int | None = None,
+        currency: str | None = None,
         include_ignored: bool = True,
         search_text: str = "",
     ) -> dict[str, Any]:
@@ -414,23 +793,35 @@ class ExpensesService:
             force_rebuild=False,
             selected_year=year,
             selected_month=month,
+            selected_currency=currency,
             include_ignored=include_ignored,
             search_text=search_text,
         )
 
     def _build_overview_payload(self, rows: list[dict[str, Any]], *, force_rebuild: bool) -> dict[str, Any]:
         now             = datetime.now().astimezone()
+        source_validator = getattr(self.mail_ingestion_service, "validate_thunderbird_directory", None)
+        source_status = source_validator() if callable(source_validator) else {}
         visible_rows    = [row for row in rows if not row.get("ignored")]
-        visible_debits  = self._rows_by_direction(visible_rows, "debit")
-        visible_credits = self._rows_by_direction(visible_rows, "credit")
+        currencies      = sorted({self._currency(row) for row in visible_rows}) or ["INR"]
+        primary_currency = "INR" if "INR" in currencies else currencies[0]
+        primary_rows    = [row for row in visible_rows if self._currency(row) == primary_currency]
+        visible_debits  = self._rows_by_direction(primary_rows, "debit")
+        visible_credits = self._rows_by_direction(primary_rows, "credit")
         metrics         = self._period_metrics(visible_debits, now)
         vendors         = self._build_vendor_summary(visible_debits)
+        summary_by_currency = {}
+        for currency in currencies:
+            currency_rows = [row for row in visible_rows if self._currency(row) == currency]
+            summary_by_currency[currency] = self._period_metrics(self._rows_by_direction(currency_rows, "debit"), now)
+        top_vendor = {"vendor": vendors[0]["vendor"], "amount": float(vendors[0]["amount"]), "currency": primary_currency} if vendors else {"vendor": "None", "amount": 0.0, "currency": primary_currency}
         return {
             "summary": {key: metrics[key] for key in ("today", "yesterday", "week", "month", "year")},
-            "topVendor": {"vendor": vendors[0]["vendor"] if vendors else "None", "amount": float(vendors[0]["amount"]) if vendors else 0.0},
-            "recent": [self._serialize_transaction(row, {}) for row in visible_rows[:5]],
+            "summaryByCurrency": summary_by_currency,
+            "topVendor": top_vendor,
+            "recent": [self._serialize_transaction(row, {}) for row in primary_rows[:5]],
             "highlights": {"creditThisMonth": self._period_metrics(visible_credits, now)["month"], "netThisMonth": self._net_flow(visible_debits, visible_credits)["net"]},
-            "meta": {"lastRebuiltAt": now.isoformat(), "forceRebuild": force_rebuild, "ignoredCount": len([row for row in rows if row.get("ignored")]), "rebuildProgress": self._current_background_state()},
+            "meta": {"lastRebuiltAt": now.isoformat(), "forceRebuild": force_rebuild, "ignoredCount": len([row for row in rows if row.get("ignored")]), "currencies": currencies, "primaryCurrency": primary_currency, "mixedCurrency": len(currencies) > 1, "sourceReady": bool(source_status.get("valid")) if isinstance(source_status, dict) else True, "sourceMessage": str(source_status.get("message", "")) if isinstance(source_status, dict) else "", "rebuildProgress": self._current_background_state()},
         }
 
     def _build_tab_payload(
@@ -440,14 +831,19 @@ class ExpensesService:
         force_rebuild: bool,
         selected_year: int | None = None,
         selected_month: int | None = None,
+        selected_currency: str | None = None,
         include_ignored: bool = True,
         search_text: str = "",
     ) -> dict[str, Any]:
         now              = datetime.now().astimezone()
-        visible_rows     = list(rows) if include_ignored else [row for row in rows if not row.get("ignored")]
+        currencies       = sorted({self._currency(row) for row in rows}) or ["INR"]
+        requested_currency = str(selected_currency or "").strip().upper()
+        default_currency = requested_currency if requested_currency in currencies else "INR" if "INR" in currencies else currencies[0]
+        currency_rows    = [row for row in rows if self._currency(row) == default_currency]
+        visible_rows     = list(currency_rows) if include_ignored else [row for row in currency_rows if not row.get("ignored")]
         visible_debits   = self._rows_by_direction([row for row in visible_rows if not row.get("ignored")], "debit")
         visible_credits  = self._rows_by_direction([row for row in visible_rows if not row.get("ignored")], "credit")
-        years            = sorted({self._transaction_dt(row).year for row in rows if self._transaction_dt(row)}, reverse=True) or [now.year]
+        years            = sorted({self._transaction_dt(row).year for row in currency_rows if self._transaction_dt(row)}, reverse=True) or [now.year]
         requested_year   = int(selected_year or 0)
         requested_month  = int(selected_month or 0)
         default_year     = requested_year if requested_year in years else now.year if now.year in years else years[0]
@@ -459,15 +855,15 @@ class ExpensesService:
             selected_rows = [row for row in selected_rows if self._row_matches_search(row, search_text)]
         selected_debits  = self._rows_by_direction(selected_rows, "debit")
         selected_credits = self._rows_by_direction(selected_rows, "credit")
-        vendor_summary   = self._build_vendor_summary(selected_debits)
         selected_summary = self._build_vendor_summary(selected_debits)
+        vendor_summary   = selected_summary[: self.VENDOR_DIRECTORY_LIMIT]
         selected_vendor  = self._selected_top_vendor(selected_summary)
         page_size        = 200
         serialized_rows  = selected_rows[:page_size]
         all_time_summary = self._build_vendor_summary(visible_debits)
         return {
-            "filters": {"availableYears": years, "availableMonths": [{"value": 0, "label": "All Months"}] + [{"value": month, "label": datetime(now.year, month, 1).strftime("%b")} for month in range(1, 13)], "defaultYear": default_year, "defaultMonth": default_month, "pageSize": page_size},
-            "accounts": self._account_values(rows),
+            "filters": {"availableYears": years, "availableMonths": [{"value": 0, "label": "All Months"}] + [{"value": month, "label": datetime(now.year, month, 1).strftime("%b")} for month in range(1, 13)], "availableCurrencies": currencies, "defaultCurrency": default_currency, "defaultYear": default_year, "defaultMonth": default_month, "pageSize": page_size},
+            "accounts": self._account_values(currency_rows),
             "transactions": [self._serialize_transaction(row, recurring_lookup) for row in serialized_rows],
             "yearlySeries": [self._build_year_series(year, visible_debits) for year in years],
             "creditYearMonths": self._build_year_series(default_year, visible_credits).get("months", []),
@@ -482,6 +878,7 @@ class ExpensesService:
             "ledgerGroups": [],
             "selectedTopVendor": selected_vendor,
             "selectedInsights": self._selected_insights(selected_debits, selected_summary, recurring, default_year, default_month),
+            "selectedMetrics": self._selected_metrics(selected_rows, selected_debits, selected_credits),
             "allTimeInsights": self._all_time_insights(visible_debits, all_time_summary, recurring),
             "selectedCreditSummary": self._credit_summary(selected_credits),
             "selectedNetFlow": self._net_flow(selected_debits, selected_credits),
@@ -490,7 +887,7 @@ class ExpensesService:
             "categorySummary": self._category_summary(visible_debits),
             "selectedVendorDetail": {},
             "backgroundState": {"expenses": self._current_background_state()},
-            "meta": {"visibleTransactionCount": len([row for row in rows if not row.get("ignored")]), "ignoredTransactionCount": len([row for row in rows if row.get("ignored")]), "loadedTransactionCount": len(serialized_rows), "analysisDataMode": "db-backed-bootstrap", "lastRebuiltAt": now.isoformat(), "forceRebuild": force_rebuild, "materializationVersion": self.MATERIALIZATION_VERSION, "rebuildProgress": self._current_background_state()},
+            "meta": {"visibleTransactionCount": len([row for row in currency_rows if not row.get("ignored")]), "ignoredTransactionCount": len([row for row in currency_rows if row.get("ignored")]), "loadedTransactionCount": len(serialized_rows), "vendorDirectoryCount": len(vendor_summary), "vendorDirectoryTruncated": len(selected_summary) > len(vendor_summary), "currency": default_currency, "analysisDataMode": "db-backed-bootstrap", "lastRebuiltAt": now.isoformat(), "forceRebuild": force_rebuild, "materializationVersion": self.MATERIALIZATION_VERSION, "rebuildProgress": self._current_background_state()},
         }
 
     def _row_matches_search(self, row: dict[str, Any], search_text: str) -> bool:
@@ -818,8 +1215,80 @@ class ExpensesService:
         daily             = self._month_daily_series(rows, year, month)
         weekly            = self._month_weekly_series(rows, year, month)
         top_by_count      = sorted(vendor_summary, key=lambda item: (item["count"], item["amount"]), reverse=True)
-        recurring_vendors = {item.get("vendorKey", "") for item in recurring}
-        return {"topVendorByAmount": self._selected_top_vendor(vendor_summary), "topVendorByCount": self._selected_top_vendor(top_by_count), "highestSpendDay": max(daily, key=lambda item: float(item.get("amount", 0.0) or 0.0), default={"label": "-", "amount": 0.0}), "highestSpendWeek": max(weekly, key=lambda item: float(item.get("amount", 0.0) or 0.0), default={"label": "-", "amount": 0.0}), "largestTransaction": self._largest_transaction(rows), "recurringActiveCount": len({self._vendor_key(row) for row in rows if self._vendor_key(row) in recurring_vendors})}
+        recurring_vendors = {str(item.get("vendorKey", "")).strip() for item in recurring}
+        active_vendor_keys = {self._vendor_key(row) for row in rows}
+        active_patterns = [
+            item
+            for item in recurring
+            if str(item.get("vendorKey", "")).strip() in active_vendor_keys
+        ]
+        strongest = sorted(
+            active_patterns,
+            key=lambda item: (
+                str(item.get("cadence", "")) != "Monthly recurring",
+                -float(item.get("averageAmount", 0.0) or 0.0),
+                -int(item.get("transactionCount", 0) or 0),
+            ),
+        )[0] if active_patterns else {}
+        debit_amounts = [self._amount(row) or 0.0 for row in rows if self._amount(row) is not None]
+        return {
+            "topVendorByAmount": self._selected_top_vendor(vendor_summary),
+            "topVendorByCount": self._selected_top_vendor(top_by_count),
+            "highestSpendDay": max(daily, key=lambda item: float(item.get("amount", 0.0) or 0.0), default={"label": "-", "amount": 0.0}),
+            "highestSpendWeek": max(weekly, key=lambda item: float(item.get("amount", 0.0) or 0.0), default={"label": "-", "amount": 0.0}),
+            "largestTransaction": self._largest_transaction(rows),
+            "medianTransactionAmount": float(median(debit_amounts)) if debit_amounts else 0.0,
+            "recurringActiveCount": len({self._vendor_key(row) for row in rows if self._vendor_key(row) in recurring_vendors}),
+            "strongestRecurring": {
+                "vendor": str(strongest.get("vendor", "")),
+                "cadence": str(strongest.get("cadence", "")),
+                "averageAmount": float(strongest.get("averageAmount", 0.0) or 0.0),
+            } if strongest else {},
+            "recurringMonthlyBurden": float(
+                sum(
+                    item.get("averageAmount", 0.0) or 0.0
+                    for item in active_patterns
+                    if str(item.get("cadence", "")).strip() == "Monthly recurring"
+                )
+            ),
+        }
+
+    def _selected_metrics(
+        self,
+        rows: list[dict[str, Any]],
+        debit_rows: list[dict[str, Any]],
+        credit_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return complete selected-range totals independent of the bounded row preview."""
+
+        debit_total = float(sum(self._amount(row) or 0.0 for row in debit_rows))
+        credit_total = float(sum(self._amount(row) or 0.0 for row in credit_rows))
+        active_debit_days = len(
+            {
+                self._transaction_dt(row).date().isoformat()
+                for row in debit_rows
+                if self._transaction_dt(row) is not None
+            }
+        )
+        currencies = sorted(
+            {
+                str(row.get("currency", "INR") or "INR").strip().upper()
+                for row in rows
+            }
+        ) or ["INR"]
+        return {
+            "transactionCount": len(rows),
+            "debitCount": len(debit_rows),
+            "creditCount": len(credit_rows),
+            "debitTotal": debit_total,
+            "creditTotal": credit_total,
+            "net": credit_total - debit_total,
+            "activeDebitDays": active_debit_days,
+            "averageDebit": debit_total / max(len(debit_rows), 1),
+            "averageActiveDay": debit_total / max(active_debit_days, 1),
+            "currencies": currencies,
+            "mixedCurrency": len(currencies) > 1,
+        }
 
     def _all_time_insights(self, rows: list[dict[str, Any]], vendor_summary: list[dict[str, Any]], recurring: list[dict[str, Any]]) -> dict[str, Any]:
         top_by_count = sorted(vendor_summary, key=lambda item: (item["count"], item["amount"]), reverse=True)
@@ -976,7 +1445,7 @@ class ExpensesService:
         if stage == "completed":
             return
         label       = "Refreshing expenses"
-        if stage in {"provider_started", "provider_progress"} and provider_id:
+        if stage in {"provider_started", "provider_progress", "provider_scanning"} and provider_id:
             label = f"Scanning {provider_id}"
         elif stage == "provider_completed" and provider_id:
             label = f"Completed {provider_id}"
@@ -1079,6 +1548,13 @@ class ExpensesService:
         direction = self._key_token(payload.get("direction")) or "unknown"
         transaction_id = self._key_token(payload.get("transactionId"))
         if transaction_id:
+            stamp = self._transaction_dt(payload) or self._transaction_dt(fact)
+            if stamp is not None:
+                if stamp.tzinfo is not None:
+                    stamp = stamp.astimezone(timezone.utc)
+                timestamp_token = stamp.replace(second=0, microsecond=0).isoformat()
+            else:
+                timestamp_token = self._key_token(payload.get("timestamp")) or "unknown_timestamp"
             return "|".join(
                 [
                     "txn",
@@ -1086,6 +1562,7 @@ class ExpensesService:
                     account_suffix or "unknown_account",
                     direction,
                     transaction_id,
+                    timestamp_token,
                 ]
             )
 
@@ -1103,8 +1580,21 @@ class ExpensesService:
                 amount_token,
                 timestamp_token,
                 counterparty or "unknown_counterparty",
+                self._key_token(fact.get("providerId")) or "unknown_provider",
+                self._key_token(fact.get("externalId")) or "unknown_source",
             ]
         )
+
+    def _canonical_transaction_key(self, fact: dict[str, Any]) -> str:
+        """Apply persisted user fuzzy-merge decisions without hiding unreviewed records."""
+
+        return self._canonical_duplicate_transaction_key(self._transaction_key(fact))
+
+    def _canonical_duplicate_transaction_key(self, transaction_key: str) -> str:
+        """Apply a persisted fuzzy-duplicate merge to an already-built key."""
+
+        resolver = getattr(self.expenses_repository, "canonical_duplicate_transaction_key", None)
+        return str(resolver(transaction_key)) if callable(resolver) else transaction_key
 
     def _account_key(self, row: dict[str, Any]) -> str:
         return f"{(str(row.get('bankName', '')).strip() or 'Unknown bank').lower()}:{str(row.get('accountSuffix', '')).strip() or 'unknown'}"
@@ -1145,4 +1635,10 @@ class ExpensesService:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _currency(row: dict[str, Any]) -> str:
+        """Return the normalized ISO-style currency token for one transaction."""
+
+        return str(row.get("currency", "INR") or "INR").strip().upper() or "INR"
 

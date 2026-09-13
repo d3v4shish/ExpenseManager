@@ -11,7 +11,7 @@ from datetime import datetime
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.expenses.email.mail_types import SourceRecord
 
@@ -29,7 +29,12 @@ class ThunderbirdMailboxReader:
         self.local_config_path = local_config_path
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def fetch_records(self, since: datetime | None = None) -> list[SourceRecord]:
+    def fetch_records(
+        self,
+        since: datetime | None = None,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[SourceRecord]:
         """Return Thunderbird mail as normalized source records."""
 
         mailbox_paths = self.resolve_mailbox_paths()
@@ -67,6 +72,14 @@ class ThunderbirdMailboxReader:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tb-mail") as executor:
                 for message in mbox:
                     mailbox_total += 1
+                    if progress_callback is not None and mailbox_total % 250 == 0:
+                        progress_callback(
+                            {
+                                "mailboxPath": str(mailbox_path),
+                                "processed": mailbox_total,
+                                "fetched": mailbox_fetched,
+                            }
+                        )
                     received_dt = self._message_datetime(message)
                     if received_dt is not None:
                         if mailbox_first_dt is None or received_dt < mailbox_first_dt:
@@ -99,6 +112,25 @@ class ThunderbirdMailboxReader:
         self.logger.info("Fetched Thunderbird email records count=%s", len(records))
         records.sort(key=lambda item: item.received_at, reverse=True)
         return records
+
+    def source_fingerprint(self) -> list[dict[str, int | str]]:
+        """Describe the current mailbox files so unchanged refreshes can skip a full scan."""
+
+        result: list[dict[str, int | str]] = []
+        for path in self.resolve_mailbox_paths():
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            result.append(
+                {
+                    "path": str(path.resolve()),
+                    "size": int(stat.st_size),
+                    "modifiedNs": int(stat.st_mtime_ns),
+                }
+            )
+        result.sort(key=lambda item: str(item["path"]))
+        return result
 
     def resolve_mailbox_paths(self) -> list[Path]:
         """Return configured Thunderbird mailbox files that can be parsed."""

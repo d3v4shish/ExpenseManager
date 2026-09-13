@@ -1,0 +1,6 @@
+{
+  "id": "panel.expense_insights",
+  "widget": "ExpenseInsightsWidget",
+  "title": "Insight Inbox",
+  "subtitle": "Explainable local spend signals with transaction-level evidence."
+}

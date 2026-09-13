@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Uninstall ExpenseManager
+Comment=Choose data retention and uninstall ExpenseManager
+Exec=/usr/bin/expense-manager-uninstall
+Icon=expense-manager
+Terminal=false
+Categories=Settings;

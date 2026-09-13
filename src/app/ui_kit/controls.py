@@ -93,6 +93,7 @@ def make_label(
     """Create the shared standalone-app text label."""
 
     label = QLabel(text)
+    label.setAccessibleName(text)
     font = QFont(family or _ui_kit_font_family(mono=mono), pointSize=size)
     font.setBold(bold)
     label.setFont(font)
@@ -106,6 +107,8 @@ def make_button(text: str, border: str, fg: str, bg: str, *, emphasis: str = "ne
     """Create the shared standalone-app push button."""
 
     button = QPushButton(text)
+    button.setAccessibleName(text)
+    button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     font = QFont(_ui_kit_font_family(mono=False), pointSize=9)
     font.setBold(True)
@@ -201,7 +204,15 @@ class Dot(QWidget):
 class CardFrame(QFrame):
     """Draw the shared flat card surface used across the app."""
 
-    def __init__(self, bg: str, border: str, radius: int | None = None, glow: str | None = None) -> None:
+    def __init__(
+        self,
+        bg: str,
+        border: str,
+        radius: int | None = None,
+        glow: str | None = None,
+        *,
+        hover_effect: bool = False,
+    ) -> None:
         """Store card colors and enable translucent custom painting."""
 
         super().__init__()
@@ -209,6 +220,7 @@ class CardFrame(QFrame):
         self.border_color = QColor(border)
         self.accent_color = QColor(glow or "#00000000")
         self.radius = _ui_kit_radius() if radius is None else max(0, int(radius))
+        self.hover_effect = bool(hover_effect)
         self.hovered = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
@@ -249,17 +261,19 @@ class CardFrame(QFrame):
             )
 
     def enterEvent(self, event) -> None:  # noqa: N802
-        """Raise the card surface slightly on hover."""
+        """Raise interactive card surfaces slightly on hover."""
 
-        self.hovered = True
-        self.update()
+        if self.hover_effect:
+            self.hovered = True
+            self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         """Restore the default card surface when the pointer exits."""
 
-        self.hovered = False
-        self.update()
+        if self.hover_effect:
+            self.hovered = False
+            self.update()
         super().leaveEvent(event)
 
 

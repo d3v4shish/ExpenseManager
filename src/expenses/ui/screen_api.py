@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from src.app.logging_utils import apply_logging_settings
 from src.app.migrate import migrate_legacy_data
 from src.expenses.account_config import (
     account_db_path,
@@ -15,11 +16,19 @@ from src.expenses.account_config import (
     rewrite_local_thunderbird_config,
     rewrite_managed_thunderbird_provider,
 )
-from src.expenses.email.thunderbird_profile import discover_thunderbird_profile_accounts
+from src.expenses.email.thunderbird_profile import discover_default_thunderbird_profiles, discover_thunderbird_profile_accounts
 
-EXPENSE_DATA_CARD_IDS = ("panel.expenses", "panel.expenses_tab")
-EXPENSE_RUNTIME_CARD_IDS = ("panel.expenses", "panel.expenses_config", "panel.expenses_debug", "panel.expenses_tab")
-EXPENSE_DEBUG_CARD_IDS = ("panel.expenses", "panel.expenses_debug", "panel.expenses_tab")
+EXPENSE_DATA_CARD_IDS = ("panel.expenses", "panel.expense_insights", "panel.expenses_tab")
+EXPENSE_RUNTIME_CARD_IDS = (
+    "panel.expenses",
+    "panel.expense_insights",
+    "panel.expenses_config",
+    "panel.expenses_debug",
+    "panel.expenses_settings",
+    "panel.expenses_tab",
+)
+EXPENSE_DEBUG_CARD_IDS = ("panel.expenses", "panel.expense_insights", "panel.expenses_debug", "panel.expenses_tab")
+SOURCE_PRESENTATION_FIELDS = {"validation", "featureEnabled", "recordCount", "payloadBytes", "newestRecordAt"}
 
 
 class ExpensesScreenApi:
@@ -32,7 +41,11 @@ class ExpensesScreenApi:
         expenses_repository,
         vendor_catalog_service,
         bank_rule_catalog=None,
+        template_mining_service=None,
         mail_ingestion_service=None,
+        analytics_service=None,
+        settings_service=None,
+        data_management_service=None,
         files=None,
     ) -> None:
         """Store the domain services used by the screen widgets."""
@@ -41,7 +54,11 @@ class ExpensesScreenApi:
         self.expenses_repository = expenses_repository
         self.vendor_catalog_service = vendor_catalog_service
         self.bank_rule_catalog = bank_rule_catalog
+        self.template_mining_service = template_mining_service
         self.mail_ingestion_service = mail_ingestion_service
+        self.analytics_service = analytics_service
+        self.settings_service = settings_service
+        self.data_management_service = data_management_service
         self.files = files
         self.window_api = None
 
@@ -62,6 +79,288 @@ class ExpensesScreenApi:
         if self.window_api is not None:
             self.window_api.run_job("expenses.rebuild")
 
+    def run_analytics(self) -> None:
+        """Request a local insight recomputation from the app shell."""
+
+        if self.window_api is not None:
+            self.window_api.run_job("analytics.recompute")
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        """Return local source definitions with current validation state."""
+
+        files = self._require_files()
+        try:
+            config = files.read_user("email_accounts.json")
+        except FileNotFoundError:
+            config = {"providers": [], "sync": {}}
+        ingestion = self._require_mail_ingestion_service()
+        providers = [dict(item) for item in config.get("providers", []) if isinstance(item, dict)]
+        feature_flags = dict(getattr(ingestion, "DEFAULT_SOURCE_FEATURES", {}))
+        configured_flags = config.get("sourceFeatures", {})
+        if isinstance(configured_flags, dict):
+            feature_flags.update({str(key).strip().lower(): bool(value) for key, value in configured_flags.items()})
+        result: list[dict[str, Any]] = []
+        summaries = self.expenses_repository.source_storage_summaries()
+        for provider_config in providers:
+            provider_type = str(provider_config.get("type", "")).strip().lower()
+            summary = summaries.get(str(provider_config.get("id", "")).strip(), {})
+            if not bool(feature_flags.get(provider_type, False)):
+                result.append({**provider_config, **summary, "featureEnabled": False, "validation": {"valid": False, "message": f"{provider_type} is disabled by its local feature flag."}})
+                continue
+            try:
+                provider = ingestion.provider_registry.create(provider_config, ingestion.thunderbird_local_path)
+                result.append({**provider_config, **summary, "featureEnabled": True, "validation": provider.validate()})
+            except ValueError as exc:
+                result.append({**provider_config, **summary, "featureEnabled": True, "validation": {"valid": False, "message": str(exc)}})
+        return result
+
+    def validate_configured_sources(self) -> dict[str, Any]:
+        """Return a job-ready status for all enabled sources, not just Thunderbird."""
+
+        sources = self.list_sources()
+        enabled = [source for source in sources if bool(source.get("enabled", True))]
+        valid = [source for source in enabled if bool(dict(source.get("validation", {})).get("valid"))]
+        invalid = [source for source in enabled if not bool(dict(source.get("validation", {})).get("valid"))]
+        if valid:
+            return {
+                "valid": True,
+                "message": "",
+                "enabledCount": len(enabled),
+                "validCount": len(valid),
+                "invalidSources": [str(source.get("id", "")) for source in invalid],
+            }
+        if not enabled:
+            return {
+                "valid": False,
+                "message": "Add and enable at least one local source before importing.",
+                "enabledCount": 0,
+                "validCount": 0,
+                "invalidSources": [],
+            }
+        messages = [str(dict(source.get("validation", {})).get("message", "")).strip() for source in invalid]
+        return {
+            "valid": False,
+            "message": next((message for message in messages if message), "No enabled source is valid."),
+            "enabledCount": len(enabled),
+            "validCount": 0,
+            "invalidSources": [str(source.get("id", "")) for source in invalid],
+        }
+
+    def save_source(self, provider: dict[str, Any]) -> dict[str, Any]:
+        """Persist one local source definition after provider-level validation."""
+
+        provider = self._source_definition(provider)
+        provider_id = str(provider.get("id", "")).strip()
+        provider_type = str(provider.get("type", "")).strip().lower()
+        if not provider_id or not provider_type:
+            raise ValueError("Source id and type are required.")
+        files = self._require_files()
+        ingestion = self._require_mail_ingestion_service()
+        normalized = {**provider, "id": provider_id, "type": provider_type, "enabled": bool(provider.get("enabled", True))}
+        instance = ingestion.provider_registry.create(normalized, ingestion.thunderbird_local_path)
+        validation = instance.validate()
+        if bool(normalized["enabled"]) and not bool(validation.get("valid")):
+            raise ValueError(str(validation.get("message", "Source is not valid.")))
+        try:
+            config = files.read_user("email_accounts.json")
+        except FileNotFoundError:
+            config = {"providers": [], "sync": {}}
+        providers = [dict(item) for item in config.get("providers", []) if isinstance(item, dict) and str(item.get("id", "")).strip() != provider_id]
+        providers.append(normalized)
+        files.write_user("email_accounts.json", {**config, "providers": providers})
+        return {**normalized, "validation": validation}
+
+    def validate_source(self, provider: dict[str, Any]) -> dict[str, Any]:
+        """Validate a displayed source without changing its stored configuration."""
+
+        source = self._source_definition(provider)
+        provider_id = str(source.get("id", "")).strip()
+        provider_type = str(source.get("type", "")).strip().lower()
+        if not provider_id or not provider_type:
+            raise ValueError("Source id and type are required.")
+        ingestion = self._require_mail_ingestion_service()
+        instance = ingestion.provider_registry.create(source, ingestion.thunderbird_local_path)
+        return {"id": provider_id, "type": provider_type, "validation": instance.validate()}
+
+    @staticmethod
+    def _source_definition(provider: dict[str, Any]) -> dict[str, Any]:
+        """Strip derived source-list fields before a validation or save operation."""
+
+        return {
+            key: value
+            for key, value in dict(provider).items()
+            if key not in SOURCE_PRESENTATION_FIELDS
+        }
+
+    def remove_source(self, provider_id: str) -> dict[str, Any]:
+        """Remove configuration only; retained source-derived transactions stay intact."""
+
+        files = self._require_files()
+        try:
+            config = files.read_user("email_accounts.json")
+        except FileNotFoundError:
+            config = {"providers": [], "sync": {}}
+        providers = [dict(item) for item in config.get("providers", []) if isinstance(item, dict)]
+        remaining = [item for item in providers if str(item.get("id", "")).strip() != str(provider_id).strip()]
+        if len(remaining) == len(providers):
+            raise ValueError(f"Source '{provider_id}' was not configured.")
+        files.write_user("email_accounts.json", {**config, "providers": remaining})
+        return {"removed": str(provider_id), "transactionsDeleted": False}
+
+    def delete_source_data(self, provider_id: str) -> dict[str, Any]:
+        """Delete retained source records only after an explicit UI confirmation."""
+
+        self._ensure_expenses_jobs_idle()
+        report = self.expenses_service.delete_source_data(provider_id)
+        self._reload_cards(*EXPENSE_DATA_CARD_IDS)
+        return report
+
+    def list_duplicate_candidates(self, state: str = "needs_review") -> list[dict[str, Any]]:
+        return self.expenses_repository.list_duplicate_candidates(state=state)
+
+    def resolve_duplicate_candidate(self, candidate_key: str, decision: str) -> dict[str, Any]:
+        resolver = getattr(self.expenses_service, "resolve_duplicate_candidate", None)
+        if callable(resolver):
+            result = resolver(candidate_key, decision)
+            self._reload_cards(*EXPENSE_DATA_CARD_IDS)
+            return result
+        self.expenses_repository.resolve_duplicate_candidate(candidate_key, decision)
+        return {"candidateKey": candidate_key, "decision": decision}
+
+    def list_reconciliation_conflicts(self, status: str = "") -> list[dict[str, Any]]:
+        return self.expenses_service.list_reconciliation_conflicts(status=status)
+
+    def reconciliation_policy(self) -> dict[str, Any]:
+        return self.expenses_service.get_reconciliation_policy()
+
+    def resolve_reconciliation_conflict(self, reconciliation_key: str, selected_signature: str) -> dict[str, Any]:
+        self._ensure_expenses_jobs_idle()
+        result = self.expenses_service.resolve_reconciliation_conflict(reconciliation_key, selected_signature)
+        self._reload_cards(*EXPENSE_DATA_CARD_IDS)
+        return result
+
+    def set_reconciliation_policy(self, mode: str, *, preferred_provider_id: str = "") -> dict[str, Any]:
+        self._ensure_expenses_jobs_idle()
+        result = self.expenses_service.set_reconciliation_policy(mode, preferred_provider_id=preferred_provider_id)
+        self._reload_cards(*EXPENSE_DATA_CARD_IDS)
+        return result
+
+    def list_transaction_sources(self, transaction_key: str) -> list[dict[str, Any]]:
+        return self.expenses_repository.list_transaction_sources(transaction_key)
+
+    def list_source_debug_rows(self, provider_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        return self.expenses_repository.list_source_debug_rows(provider_id=provider_id, limit=limit)
+
+    def get_source_record_detail(self, source_record_id: int) -> dict[str, Any] | None:
+        return self.expenses_repository.get_candidate_mail_detail(int(source_record_id))
+
+    def get_settings_snapshot(self) -> dict[str, Any]:
+        if self.settings_service is None:
+            return {}
+        return self.settings_service.load()
+
+    def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.settings_service is None:
+            raise RuntimeError("Settings service is unavailable.")
+        settings = self.settings_service.save(payload)
+        apply_logging_settings(dict(settings.get("logging", {})))
+        if self.analytics_service is not None:
+            self.analytics_service.recompute()
+        return settings
+
+    def get_storage_report(self) -> dict[str, Any]:
+        if self.data_management_service is None:
+            return {"categories": [], "totalSizeBytes": 0, "importantSizeBytes": 0, "generatedSizeBytes": 0}
+        return self.data_management_service.storage_report()
+
+    def create_backup(self, destination: str) -> dict[str, Any]:
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        self._ensure_expenses_jobs_idle()
+        return self.data_management_service.create_backup(destination)
+
+    def inspect_backup(self, source: str) -> dict[str, Any]:
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        return self.data_management_service.inspect_backup(source)
+
+    def restore_backup(self, source: str) -> dict[str, Any]:
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        self._ensure_expenses_jobs_idle()
+        report = self.data_management_service.restore_backup(source)
+        files = self._require_files()
+        vendor_repository = getattr(self.vendor_catalog_service, "repository", None)
+        ensure_vendor_schema = getattr(vendor_repository, "ensure_schema", None)
+        if callable(ensure_vendor_schema):
+            ensure_vendor_schema()
+        next_db_path = resolve_active_expenses_db_path(files, load_email_accounts_config(files))
+        switch_report = self.expenses_service.switch_expenses_database(next_db_path)
+        if self.settings_service is not None:
+            apply_logging_settings(dict(self.settings_service.load().get("logging", {})))
+        if self.analytics_service is not None:
+            self.analytics_service.recompute()
+        return {**report, "switchReport": switch_report}
+
+    def clear_generated_data(self, categories: list[str]) -> dict[str, Any]:
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        return self.data_management_service.clear_generated(categories)
+
+    def delete_database(self, path: str) -> dict[str, Any]:
+        """Delete one selected inactive ExpenseManager database after jobs are idle."""
+
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        self._ensure_expenses_jobs_idle()
+        target = Path(path).expanduser().resolve()
+        active = Path(getattr(self.expenses_repository, "db_path", "")).expanduser().resolve()
+        if target == active:
+            raise RuntimeError("The active expense database cannot be deleted while this account is open.")
+        return self.data_management_service.delete_database(target)
+
+    def prepare_uninstall(self, *, keep_important: bool) -> dict[str, Any]:
+        if self.data_management_service is None:
+            raise RuntimeError("Data management service is unavailable.")
+        self._ensure_expenses_jobs_idle()
+        return self.data_management_service.prepare_uninstall(keep_important=keep_important)
+
+    def list_insights(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        severity: str = "",
+        insight_type: str = "",
+        search_text: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if self.analytics_service is None:
+            return {"rows": [], "total": 0, "limit": limit, "offset": offset, "hasMore": False}
+        return self.analytics_service.list_insights(
+            statuses=statuses,
+            severity=severity,
+            insight_type=insight_type,
+            search_text=search_text,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_insight_detail(self, insight_key: str) -> dict[str, Any] | None:
+        if self.analytics_service is None:
+            return None
+        return self.analytics_service.get_insight(insight_key)
+
+    def set_insight_status(self, insight_key: str, status: str) -> dict[str, Any]:
+        if self.analytics_service is None:
+            raise RuntimeError("Analytics service is unavailable.")
+        return self.analytics_service.set_status(insight_key, status)
+
+    def unread_insight_count(self) -> int:
+        if self.analytics_service is None:
+            return 0
+        return self.analytics_service.unread_count()
+
     def get_bank_rule_config_snapshot(self) -> dict[str, Any]:
         """Return the shipped, local, and effective bank-rule payloads."""
 
@@ -77,6 +376,25 @@ class ExpensesScreenApi:
             "overridesText": catalog.payload_text(overrides),
             "effectiveText": catalog.payload_text(effective),
         }
+
+    def mine_bank_alert_templates(self, *, provider_id: str = "", limit: int = 2_000, min_support: int = 2) -> dict[str, Any]:
+        """Cluster stored email candidates into masked, review-only templates."""
+
+        if self.template_mining_service is None:
+            raise RuntimeError("Template mining is unavailable.")
+        return self.template_mining_service.mine(provider_id=provider_id, limit=limit, min_support=min_support)
+
+    def build_mined_bank_rule_draft(self, template_key: str, *, provider_id: str = "", limit: int = 2_000, min_support: int = 2) -> dict[str, Any]:
+        """Build an unsaved editable bank-rule draft from one mined template."""
+
+        if self.template_mining_service is None:
+            raise RuntimeError("Template mining is unavailable.")
+        return self.template_mining_service.build_draft(
+            template_key,
+            provider_id=provider_id,
+            limit=limit,
+            min_support=min_support,
+        )
 
     def get_mail_debug_snapshot(self) -> dict[str, Any]:
         """Return the newest candidate-mail rows plus the active rule config."""
@@ -151,7 +469,15 @@ class ExpensesScreenApi:
     def reparse_candidate_mails(self) -> dict[str, Any]:
         """Re-run parsing for every stored candidate email and refresh derived views."""
 
-        report = self.expenses_service.reparse_candidate_mails()
+        return self.reparse_source_records()
+
+    def reparse_source_records(self) -> dict[str, Any]:
+        """Re-run every retained local source through its matching parser chain."""
+
+        handler = getattr(self.expenses_service, "reparse_source_records", None)
+        if not callable(handler):
+            handler = self.expenses_service.reparse_candidate_mails
+        report = handler()
         self._reload_cards(*EXPENSE_DEBUG_CARD_IDS)
         return report
 
@@ -191,6 +517,38 @@ class ExpensesScreenApi:
             "selectedAccountEmail": selected_email,
             "selectedMailboxPath": str(selected_account.get("defaultMailboxRel", "")) if selected_account else "",
         }
+
+    def discover_default_thunderbird_profiles(self) -> list[dict[str, Any]]:
+        """Return usable Thunderbird profiles from known locations under ``/home``."""
+
+        snapshot = self.get_expense_mail_config_snapshot()
+        active_email = str(snapshot.get("activeAccountEmail", "")).strip()
+        profiles: list[dict[str, Any]] = []
+        for discovered in discover_default_thunderbird_profiles():
+            profile = dict(discovered)
+            accounts: list[dict[str, Any]] = []
+            for item in discovered.get("accounts", []):
+                if not isinstance(item, dict):
+                    continue
+                account = dict(item)
+                account_email = normalize_account_email(str(account.get("email", "")).strip())
+                account["email"] = account_email
+                account["dbStatus"] = self.describe_expense_account_db(account_email)
+                accounts.append(account)
+            selected = next((item for item in accounts if item.get("email") == active_email), None)
+            if selected is None and accounts:
+                selected = accounts[0]
+            profiles.append(
+                {
+                    "profilePath": str(profile.get("profilePath", "")).strip(),
+                    "accounts": accounts,
+                    "warnings": list(profile.get("warnings", [])),
+                    "error": str(profile.get("error", "")).strip(),
+                    "selectedAccountEmail": str(selected.get("email", "")) if selected else "",
+                    "selectedMailboxPath": str(selected.get("defaultMailboxRel", "")) if selected else "",
+                }
+            )
+        return profiles
 
     def describe_expense_account_db(self, account_email: str) -> dict[str, Any]:
         """Return the cache/checkpoint summary for one account-specific expenses DB."""
@@ -248,6 +606,8 @@ class ExpensesScreenApi:
             rewrite_local_thunderbird_config(local_config, profile_path=normalized_profile),
         )
         switch_report = self.expenses_service.switch_expenses_database(account_db_path(files, normalized_email))
+        if self.analytics_service is not None:
+            self.analytics_service.recompute()
         return {
             "accountEmail": normalized_email,
             "profilePath": normalized_profile,
@@ -321,6 +681,7 @@ class ExpensesScreenApi:
         *,
         year: int | None = None,
         month: int | None = None,
+        currency: str | None = None,
         include_ignored: bool = True,
         search_text: str = "",
     ) -> dict[str, Any]:
@@ -329,6 +690,7 @@ class ExpensesScreenApi:
         return self.expenses_service.build_analysis_snapshot(
             year=year,
             month=month,
+            currency=currency,
             include_ignored=include_ignored,
             search_text=search_text,
         )
@@ -338,6 +700,7 @@ class ExpensesScreenApi:
         *,
         year: int | None = None,
         month: int | None = None,
+        currency: str = "",
         include_ignored: bool = False,
         search_text: str = "",
         limit: int = 500,
@@ -348,6 +711,7 @@ class ExpensesScreenApi:
         return self.expenses_repository.list_transactions_page(
             year=year,
             month=month,
+            currency=currency,
             include_ignored=include_ignored,
             search_text=search_text,
             limit=limit,
@@ -365,12 +729,14 @@ class ExpensesScreenApi:
         alias_key: str = "",
         vendor_name: str = "",
         include_ignored: bool = False,
+        currency: str = "",
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
         """Return bounded transactions for one vendor detail request."""
 
         page = self.expenses_repository.list_transactions_page(
             include_ignored=include_ignored,
+            currency=currency,
             search_text=alias_key or vendor_name,
             limit=limit,
         )
@@ -388,12 +754,13 @@ class ExpensesScreenApi:
             ]
         return [self._decorate_vendor_transaction(row) for row in rows]
 
-    def list_ledger_groups(self, *, year: int, month: int, include_ignored: bool, search_text: str) -> list[dict[str, Any]]:
+    def list_ledger_groups(self, *, year: int, month: int, currency: str = "", include_ignored: bool, search_text: str) -> list[dict[str, Any]]:
         """Return grouped ledger rows for the current filter selection."""
 
         return self.expenses_repository.list_ledger_groups(
             year=year,
             month=month,
+            currency=currency,
             include_ignored=include_ignored,
             search_text=search_text,
         )
@@ -403,6 +770,7 @@ class ExpensesScreenApi:
         *,
         year: int,
         month: int,
+        currency: str = "",
         group_key: str,
         include_ignored: bool,
         search_text: str,
@@ -412,6 +780,7 @@ class ExpensesScreenApi:
         return self.expenses_repository.list_ledger_group_rows(
             year=year,
             month=month,
+            currency=currency,
             group_key=group_key,
             include_ignored=include_ignored,
             search_text=search_text,
@@ -795,13 +1164,17 @@ class ExpensesScreenApi:
         if self.window_api is None:
             return
         active_jobs = set(getattr(self.window_api, "active_jobs", set()))
-        if active_jobs.intersection({"expenses.refresh", "expenses.rebuild"}):
-            raise RuntimeError("Wait for the current expenses sync job to finish before switching accounts.")
+        if active_jobs.intersection({"expenses.refresh", "expenses.rebuild", "analytics.recompute"}):
+            raise RuntimeError("Wait for the current expense or analytics job to finish before changing stored data.")
 
     def _reload_cards(self, *card_ids: str) -> None:
         """Reload one explicit set of mounted cards when the window API is present."""
 
         if self.window_api is None:
+            return
+        request_reload = getattr(self.window_api, "request_card_reload", None)
+        if callable(request_reload):
+            request_reload(card_ids)
             return
         callback = getattr(self.window_api, "reload_cards", None)
         if callable(callback):

@@ -8,6 +8,50 @@ from typing import Any
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
 
+class AnalysisSnapshotSignals(QObject):
+    finished = pyqtSignal(int, dict)
+    failed = pyqtSignal(int, str)
+
+
+class AnalysisSnapshotWorker(QRunnable):
+    """Load one filter snapshot without blocking the Qt GUI thread."""
+
+    def __init__(self, *, loader, request_id: int, filters: dict[str, Any]) -> None:
+        super().__init__()
+        self.loader = loader
+        self.request_id = request_id
+        self.filters = dict(filters)
+        self.signals = AnalysisSnapshotSignals()
+
+    def run(self) -> None:
+        try:
+            payload = self.loader(**self.filters)
+            self.signals.finished.emit(self.request_id, dict(payload or {}))
+        except Exception as exc:  # noqa: BLE001
+            self.signals.failed.emit(self.request_id, str(exc))
+
+
+class SourceProvenanceSignals(QObject):
+    finished = pyqtSignal(str, list)
+    failed = pyqtSignal(str, str)
+
+
+class SourceProvenanceWorker(QRunnable):
+    """Load one transaction's source links without blocking the popup UI."""
+
+    def __init__(self, *, transaction_key: str, loader) -> None:
+        super().__init__()
+        self.transaction_key = transaction_key
+        self.loader = loader
+        self.signals = SourceProvenanceSignals()
+
+    def run(self) -> None:
+        try:
+            self.signals.finished.emit(self.transaction_key, list(self.loader(self.transaction_key)))
+        except Exception as exc:  # noqa: BLE001
+            self.signals.failed.emit(self.transaction_key, str(exc))
+
+
 class VendorDetailSignals(QObject):
     finished = pyqtSignal(str, tuple, dict)
     failed = pyqtSignal(str, tuple, str)
@@ -25,6 +69,7 @@ class VendorDetailWorker(QRunnable):
         recurring_patterns: list[dict[str, Any]],
         selected_year: int,
         selected_month: int,
+        selected_currency: str = "INR",
         dismissed_suggestions: set[str],
         load_rows=None,
     ) -> None:
@@ -38,6 +83,7 @@ class VendorDetailWorker(QRunnable):
         self.recurring_patterns = [dict(item) for item in recurring_patterns]
         self.selected_year = selected_year
         self.selected_month = selected_month
+        self.selected_currency = selected_currency
         self.dismissed_suggestions = set(dismissed_suggestions)
         self.signals = VendorDetailSignals()
 
@@ -50,6 +96,7 @@ class VendorDetailWorker(QRunnable):
                         alias_key=self.alias_key,
                         vendor_name=self.vendor_name,
                         include_ignored=False,
+                        currency=self.selected_currency,
                     )
                 ]
             detail = self._build_detail()
@@ -665,6 +712,7 @@ class LedgerRowsWorker(QRunnable):
         cache_key: tuple[Any, ...],
         year: int,
         month: int,
+        currency: str,
         group_key: str,
         include_ignored: bool,
         search_text: str,
@@ -675,6 +723,7 @@ class LedgerRowsWorker(QRunnable):
         self.cache_key = cache_key
         self.year = year
         self.month = month
+        self.currency = currency
         self.group_key = group_key
         self.include_ignored = include_ignored
         self.search_text = search_text
@@ -685,6 +734,7 @@ class LedgerRowsWorker(QRunnable):
             rows = self.load_rows(
                 year=self.year,
                 month=self.month,
+                currency=self.currency,
                 group_key=self.group_key,
                 include_ignored=self.include_ignored,
                 search_text=self.search_text,
@@ -708,6 +758,7 @@ class LedgerGroupsWorker(QRunnable):
         cache_key: tuple[Any, ...],
         year: int,
         month: int,
+        currency: str,
         include_ignored: bool,
         search_text: str,
     ) -> None:
@@ -717,6 +768,7 @@ class LedgerGroupsWorker(QRunnable):
         self.cache_key = cache_key
         self.year = year
         self.month = month
+        self.currency = currency
         self.include_ignored = include_ignored
         self.search_text = search_text
         self.signals = LedgerGroupsSignals()
@@ -726,6 +778,7 @@ class LedgerGroupsWorker(QRunnable):
             groups = self.load_groups(
                 year=self.year,
                 month=self.month,
+                currency=self.currency,
                 include_ignored=self.include_ignored,
                 search_text=self.search_text,
             )

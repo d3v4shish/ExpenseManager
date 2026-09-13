@@ -90,42 +90,77 @@ def discover_thunderbird_profile_accounts(profile_path: str) -> dict[str, Any]:
     }
 
 
-def discover_default_thunderbird_profiles(*, home: Path | None = None) -> list[dict[str, Any]]:
-    """Return Thunderbird profiles found in common local locations."""
+def discover_default_thunderbird_profiles(
+    *,
+    home: Path | None = None,
+    homes_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return profiles from known Thunderbird locations in readable home directories.
 
-    home_dir = Path(home).expanduser() if home is not None else Path.home()
-    roots = [
-        home_dir / ".thunderbird",
-        home_dir / ".mozilla-thunderbird",
-        home_dir / "snap" / "thunderbird" / "common" / ".thunderbird",
-    ]
+    Passing ``home`` scopes discovery to that one directory for deterministic
+    callers and tests.  Normal desktop discovery checks the current user's home
+    plus every readable direct child of ``/home``.  It only reads Thunderbird
+    profile metadata and checks mailbox paths; it never scans mailbox content.
+    """
+
+    home_dirs = [Path(home).expanduser()] if home is not None else _candidate_home_directories(homes_root)
     seen: set[Path] = set()
     results: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        for profile_path in _profile_paths_from_root(root):
-            resolved = profile_path.resolve()
-            if resolved in seen:
+    for home_dir in home_dirs:
+        roots = [
+            home_dir / ".thunderbird",
+            home_dir / ".mozilla-thunderbird",
+            home_dir / "snap" / "thunderbird" / "common" / ".thunderbird",
+        ]
+        for root in roots:
+            if not root.exists():
                 continue
-            seen.add(resolved)
-            result: dict[str, Any] = {"profilePath": str(profile_path)}
-            try:
-                discovery = discover_thunderbird_profile_accounts(str(profile_path))
-            except Exception as exc:  # noqa: BLE001
-                result.update({"accounts": [], "warnings": [], "error": str(exc)})
-            else:
-                result.update(
-                    {
-                        "profilePath": str(discovery.get("profilePath", profile_path)),
-                        "accounts": list(discovery.get("accounts", [])),
-                        "warnings": list(discovery.get("warnings", [])),
-                        "error": "",
-                    }
-                )
-            results.append(result)
+            for profile_path in _profile_paths_from_root(root):
+                resolved = profile_path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                result: dict[str, Any] = {"profilePath": str(profile_path)}
+                try:
+                    discovery = discover_thunderbird_profile_accounts(str(profile_path))
+                except Exception as exc:  # noqa: BLE001
+                    result.update({"accounts": [], "warnings": [], "error": str(exc)})
+                else:
+                    result.update(
+                        {
+                            "profilePath": str(discovery.get("profilePath", profile_path)),
+                            "accounts": list(discovery.get("accounts", [])),
+                            "warnings": list(discovery.get("warnings", [])),
+                            "error": "",
+                        }
+                    )
+                results.append(result)
     results.sort(key=lambda item: (0 if item.get("accounts") else 1, str(item.get("profilePath", "")).lower()))
     return results
+
+
+def _candidate_home_directories(homes_root: Path | None) -> list[Path]:
+    """Return readable direct homes without recursively traversing user data."""
+
+    candidates = [Path.home()]
+    root = Path(homes_root) if homes_root is not None else Path("/home")
+    try:
+        children = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name.lower())
+    except OSError:
+        children = []
+    candidates.extend(children)
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(candidate)
+    return result
 
 
 def _profile_paths_from_root(root: Path) -> list[Path]:

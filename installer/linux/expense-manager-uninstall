@@ -1,0 +1,7 @@
+#!/bin/sh
+/opt/expense-manager/ExpenseManager --uninstall
+status=$?
+if [ "$status" -ne 0 ]; then
+    exit "$status"
+fi
+exec pkexec dpkg --remove expense-manager

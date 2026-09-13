@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 
 @dataclass(slots=True)
@@ -17,6 +17,8 @@ class SourceRecord:
     received_at : str
     payload     : dict[str, Any] = field(default_factory=dict)
     content_hash: str = ""
+    source_uri  : str = ""
+    schema_version: int = 1
 
 
 @dataclass(slots=True)
@@ -40,6 +42,14 @@ class RecordProvider(Protocol):
 
     def fetch_records(self, since: datetime | None = None) -> list[SourceRecord]:
         """Return normalized source records."""
+
+    def iter_records(
+        self,
+        since: datetime | None = None,
+        *,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Iterable[SourceRecord]:
+        """Optionally stream normalized records when a provider is large."""
 
 
 class RecordParser(Protocol):

@@ -24,6 +24,49 @@ class VendorCatalogService:
             self.logger.warning("Vendor resolution failed raw_value=%s error=%s", raw_value, exc)
             return None
 
+    def resolve_vendors(self, raw_values: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Resolve a batch from one catalog snapshot instead of one DB connection per row."""
+
+        requested = [str(value or "").strip() for value in raw_values]
+        requested = list(dict.fromkeys(value for value in requested if value))
+        if not requested:
+            return {}
+        try:
+            records = self.repository.list_vendors()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Vendor batch resolution failed error=%s", exc)
+            return {}
+
+        exact: dict[str, dict[str, Any]] = {}
+        lowered: dict[str, dict[str, Any]] = {}
+        for record in records:
+            values = [
+                str(record.get("canonicalVendor", "")),
+                str(record.get("canonicalAlias", "")),
+                str(record.get("nickname", "")),
+                *[str(item) for item in record.get("aliases", [])],
+            ]
+            for value in values:
+                clean = value.strip()
+                if not clean:
+                    continue
+                normalized = self.repository.normalize_alias(clean)
+                if normalized:
+                    exact.setdefault(normalized, record)
+                lowered.setdefault(clean.lower(), record)
+
+        matches: dict[str, dict[str, Any] | None] = {}
+        for raw in requested:
+            normalized = self.repository.normalize_alias(raw)
+            record = exact.get(normalized) if normalized else None
+            record = record or lowered.get(raw.lower())
+            # Merged descendants are not included in the root-only list snapshot.
+            # Resolve those rare cases once per distinct raw value, never once per row.
+            if record is None:
+                record = self.repository.resolve_vendor(raw)
+            matches[raw] = dict(record) if record is not None else None
+        return matches
+
     def search_vendors(self, query: str) -> list[dict[str, Any]]:
         """Return vendors that match one free-text query."""
 

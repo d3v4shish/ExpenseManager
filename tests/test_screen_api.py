@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from src.app.files import RuntimeFiles
@@ -109,9 +110,9 @@ class ExpensesScreenApiTests(unittest.TestCase):
         self.assertEqual(
             window.reload_calls,
             [
-                ("panel.expenses", "panel.expenses_tab"),
-                ("panel.expenses", "panel.expenses_tab"),
-                ("panel.expenses", "panel.expenses_debug", "panel.expenses_tab"),
+                ("panel.expenses", "panel.expense_insights", "panel.expenses_tab"),
+                ("panel.expenses", "panel.expense_insights", "panel.expenses_tab"),
+                ("panel.expenses", "panel.expense_insights", "panel.expenses_debug", "panel.expenses_tab"),
             ],
         )
 
@@ -120,7 +121,7 @@ class ExpensesScreenApiTests(unittest.TestCase):
             root_dir = Path(temp_dir) / "app"
             source_dir = Path(temp_dir) / "source"
             app_home = Path(temp_dir) / "runtime"
-            with unittest.mock.patch.dict("os.environ", {"EXPENSE_MANAGER_HOME": str(app_home)}):
+            with mock.patch.dict("os.environ", {"EXPENSE_MANAGER_HOME": str(app_home)}):
                 files = RuntimeFiles(root_dir)
             repository = _FakeRepository(files.db_path("expenses.db"))
             expenses_service = _FakeExpensesService(repository)

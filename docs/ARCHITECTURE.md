@@ -13,12 +13,21 @@ It keeps repo-owned code, assets, defaults, and card definitions read-only. Writ
 
 Set `EXPENSE_MANAGER_HOME` to force all five writable roots under one development/test directory.
 
-The window mounts four cards:
+The window mounts seven cards:
 
 - overview: `panel.expenses`
 - Thunderbird account config: `panel.expenses_config`
+- local source management: `panel.expenses_sources`
 - mail debug: `panel.expenses_debug`
 - detailed analysis: `panel.expenses_tab`
+- Insight Inbox: `panel.expense_insights`
+- Settings & Storage: `panel.expenses_settings`
+
+## Headless CLI and reports
+
+`main.py` starts the GUI only with no arguments or the explicit `gui` command. `report`, `sources`, `duplicates`, `reconciliation`, `templates`, help, and version commands are dispatched to `src/app/cli.py` before UI imports. `ReportService` (`src/app/reports.py`) returns versioned JSON envelopes with bounded dashboard, analysis, ledger, vendor, insight, source, account, diagnostic, settings, storage, and capability data. The service reads domain services/repositories rather than Qt widgets, so the report contract remains usable in a terminal-only runtime. `templates mine` and `templates draft` use the same local mining service as Mail Debug and return masked templates/drafts, never a message body.
+
+Reports omit original message bodies, source payloads/revisions, raw bank-rule text, and raw configuration files. Thunderbird account selection remains GUI-only; the CLI exposes setup status and exact GUI guidance. Source/duplicate management retains explicit confirmation for destructive operations.
 
 The overview and analysis cards are derived from the same expense state payloads, so any mutation that changes expense rows or vendor mappings must refresh both cards. The config and debug cards stay mounted for reload consistency, but both are hidden by default and opened from the configuration flow instead of living permanently in the main scroll path.
 
@@ -30,6 +39,12 @@ The overview and analysis cards are derived from the same expense state payloads
   App bootstrap and logging setup.
 - `src/app/logging_utils.py`
   Shared rotating file logging and uncaught-exception hook setup.
+- `src/app/settings.py`
+  Validated, atomically persisted application and analytics settings.
+- `src/app/data_management.py`
+  Storage inventory, checksummed plain backup/restore, cleanup, and retention operations.
+- `src/app/uninstall.py`
+  Standalone retention prompt used by packaged uninstallers.
 - `src/app/window.py`
   Main window shell, card mounting, async job execution, and targeted card reload orchestration.
 - `src/app/ui_kit/controls.py`
@@ -46,6 +61,10 @@ The overview and analysis cards are derived from the same expense state payloads
   Expense runtime assembly: repositories, services, jobs.
 - `src/expenses/account_config.py`
   Thunderbird-provider config rewriting and per-account DB naming.
+- `src/expenses/sources/`
+  Versioned local provider registry: Thunderbird, EML folders, mapped CSV, documented SMS backups, and checksummed AxiosAlternative archives.
+- `src/expenses/ui/sources_widget.py`
+  Background-backed Sources grid, source setup dialog, read-only validation, import controls, duplicate-review queue, and exact-identity reconciliation queue.
 - `src/expenses/ui/screen_api.py`
   UI-facing facade for expense and vendor actions.
 - `src/expenses/ui/overview_widget.py`
@@ -62,23 +81,35 @@ The overview and analysis cards are derived from the same expense state payloads
   Thunderbird `prefs.js` inspector used to discover usable IMAP accounts and their default mailboxes.
 - `src/expenses/email/bank_rule_catalog.py`
   Loader/merger for shipped bank email rules, user-local override JSON, and starter rule templates.
+- `src/expenses/email/template_miner.py`
+  Deterministic masked-token clustering used to produce review-only local message templates.
 - `src/expenses/services/expense_service.py`
-  Expense materialization, derived payload generation, and vendor reconciliation.
+  Expense materialization, source reconciliation, derived payload generation, and vendor reconciliation.
+- `src/expenses/services/template_mining.py`
+  Shared GUI/CLI boundary for bounded template mining and unsaved rule-draft generation.
 - `src/expenses/services/vendor_catalog.py`
   Vendor catalog service wrapper.
+- `src/expenses/services/analytics.py`
+  Deterministic, explainable local insight generation.
 - `src/expenses/repositories/expenses_repository.py`
   Expense storage and derived query access.
 - `src/expenses/repositories/vendor_catalog_repository.py`
   Vendor catalog persistence.
+- `src/expenses/ui/insights_widget.py`
+  Virtualized, asynchronously paged Insight Inbox and evidence view.
+- `src/expenses/ui/settings_widget.py`
+  Settings, file-level storage accounting, backups, cleanup, and uninstall retention UI.
+- `src/expenses/ui/transaction_table.py`
+  Recyclable model/view transaction table used by ledger drilldowns.
 
 ## Runtime Flow
 
 1. `src/app/run.py` configures rotating file logging under the resolved `logs` directory before building the runtime.
-2. `src/expenses/bootstrap.py` resolves the active Thunderbird account, binds the expenses repository to that account's DB, and builds repositories, services, and async job specs.
+2. `src/expenses/bootstrap.py` resolves the active Thunderbird account (when configured), binds the expenses repository to the active DB, and builds the source registry, parser chain, repositories, services, and async job specs.
 3. If the active account has no dedicated DB yet but the shared app-data `expenses.db` exists, bootstrap copies that DB trio into the active account DB once and then uses the account DB going forward.
-4. `src/app/window.py` loads `AppTheme`, configures the shared UI kit, runs startup tasks, and mounts the overview/config/debug/analysis widgets.
+4. `src/app/window.py` loads `AppTheme`, configures the shared UI kit, runs startup tasks, and mounts overview/config/sources/debug/analysis/insight/settings widgets.
 5. Widgets read prepared JSON-backed card data for overview/analysis, while config/debug pull live detail through `screen_api.py` for account and candidate-mail workflows.
-6. Refresh and rebuild jobs run through `QThreadPool` and reload the card scopes that actually depend on the changed runtime files.
+6. Refresh, rebuild, analytics, backup, restore, cleanup, and storage scans run through worker threads and reload only the dependent cards.
 7. While `expenses.refresh` or `expenses.rebuild` is active, the window can surface a blocking overlay with live sync status and captures input only for the blocking phases.
 
 ## UI Ownership
@@ -88,6 +119,8 @@ The overview and analysis cards are derived from the same expense state payloads
 - `debug_widget.py` owns candidate-mail inspection, raw override editing, validation against a stored candidate, and the explicit reparse action.
   It also exposes the in-app entry point for appending a new regex-based bank rule template into the local override JSON.
 - `analysis_widget.py` owns filters, ledger browsing, vendor inspection, and mutation controls.
+- `insights_widget.py` owns filtering, pagination, evidence review, status changes, and manual recomputation.
+- `settings_widget.py` owns validated settings and user-authorized data-management actions.
 - `screen_api.py` is the boundary between widgets and domain logic.
 - `window.py` also owns card visibility state so optional panes like the Thunderbird config and mail debug cards can stay hidden until requested, and it owns the blocking busy overlay for refresh/rebuild jobs.
 
@@ -141,6 +174,23 @@ The overview and analysis cards are derived from the same expense state payloads
   Scripts are loaded from user-defined paths at app startup, run after built-in parsers, and return normalized transaction dictionaries.
   The debug pane reports script load status and import errors.
 - Saving overrides reparses stored candidates for the active account immediately. If the change broadens sender/subject matching, a rebuild is still required to backfill older historical mails that were never stored as candidates.
+
+## Local Source Ingestion And Deduplication
+
+- `SourceIngestionService` loads enabled provider definitions from `email_accounts.json`; providers expose validation, fingerprints, and record fetches, with optional `iter_records` streaming for large local folders. It records provider validation/fetch failures in `expense_import_journals` without silently skipping them.
+- Every normalized source record has a persisted schema version (currently `1`), provider ID, record type, stable external ID, content hash, timestamp, source URI, and raw normalized payload. `expense_source_revisions` preserves changed content for the same identity.
+- Built-in providers are local-only: Thunderbird, recursive EML folders (with include/exclude patterns), explicitly mapped CSV files, Android SMS Backup & Restore XML / documented JSON, and a checksummed AxiosAlternative archive (`manifest.json` + `transactions.json`, format version 1).
+- CSV setup runs its delimiter/encoding/mapping preview in a widget worker and returns at most 25 normalized sample rows; it refuses ambiguous non-ISO dates until the user supplies `mapping.dateFormat`.
+- CSV, SMS backup, EML-folder, and Axios archive providers use a complete local snapshot when their fingerprint changes. Every successfully scanned retained row is marked with the current import journal ID, then unseen records are pruned only after that scan completes. Thunderbird stays incremental and is never snapshot-pruned. Cancellation exits before pruning, so the old retained snapshot remains usable.
+- The ledger stores many-to-one source provenance in `expense_transaction_sources`. A referenced transaction's strong identity is normalized bank name, account suffix, direction, transaction ID, and transaction minute. Equal source values share one canonical transaction and all source links. The database keeps a separate `expense_reconciliation_conflicts` record when sources with that identity disagree on amount, currency, or raw merchant. It records normalized candidates, selected value, policy outcome, and timestamps; it never silently last-write-wins.
+- An unresolved exact-identity conflict creates one provisional ledger row with `reconciliationStatus: needs_review`, preventing double counting while keeping every source record as evidence. A user may select a candidate, producing `user_resolved`. Automatic choice is disabled by default; the explicit `email_accounts.json.reconciliation.exactConflictPolicy: provider_priority` policy uses its configured provider order and produces `auto_resolved`. A valid manual selection remains authoritative after later rematerialization.
+- Bounded timestamp/vendor/amount matches between transactions without the same strong identity remain fuzzy duplicate review candidates; they are never silently merged. A user-marked fuzzy merge is reapplied on later materialization while retaining every source link.
+- Import/rebuild, source validation, setup, and duplicate decisions use worker threads from the UI. Source removal only removes configuration; it does not delete retained transactions.
+- The Sources pane exposes per-provider retained-record count and payload-storage estimate. Its separate destructive action deletes selected retained records/revisions only after confirmation, preserves the source definition/original file, then rematerializes the ledger from remaining facts.
+- `email_accounts.json.sourceFeatures` provides local per-provider rollout flags. All built-in providers default enabled; a disabled provider receives a `disabled` import-journal record and is not scanned.
+- `refresh_expenses(is_cancelled=...)` stops cooperatively between normalized records, retains already-written source records for idempotent retry, and leaves the derived ledger untouched. A cancelled full rebuild raises `SourceIngestionCancelled` and restores its SQLite snapshot rather than exposing a partially rebuilt ledger.
+- AxiosAlternative archives are portable offline imports only. Device discovery, pairing, cloud upload, and live synchronization remain explicitly deferred.
+- Parser learning is local and review-first: regex bank rules, rule templates, optional trusted Python scripts, plus bounded Drain-style clustering for stored email candidates. The miner masks values and non-financial text before returning templates, does not persist raw clusters, does not infer extractor regexes, and cannot activate a generated rule. It only creates an editable draft; the user must validate and save local overrides before parsing changes.
 
 ## Vendor Category Rules
 
@@ -248,8 +298,37 @@ The following operations are intentionally off the GUI thread:
 - vendor save and delete actions
 - fuzzy alias accept actions that may create a vendor before merging
 - ignore/restore transaction actions
+- insight recomputation and page/detail loading
+- settings writes and storage inventory scans
+- backup, restore, cleanup, and uninstall-preparation work
 
 The main thread should only coordinate state, render widgets, and dispatch background work.
+
+## Analytics And Insight Lifecycle
+
+- Analytics run locally after ingestion/materialization and can also be triggered from the Insight Inbox.
+- Detection is deterministic and currency-isolated. Version `expense-insights-v1` covers possible duplicates, vendor-level unusual amounts, category/vendor month-to-date spikes, and recurring amount changes or missed charges.
+- Amount outliers use a median and median absolute deviation with configurable floors, minimum history, and sensitivity.
+- Recurrence uses observed intervals and rejects irregular series below the configured confidence threshold.
+- Every insight contains a stable key, baseline, actual value, confidence, date period, and evidence transaction keys.
+- Recomputing preserves `read` and `dismissed` choices. Findings that disappear become `resolved`; findings that recur retain their stable state.
+- Insight rows are stored in the active account database. The table model fetches bounded pages and creates no per-row widgets.
+
+## Schema, Backup, And Retention
+
+- `app_schema_versions` records component schema versions in each SQLite database.
+- Before an upgrade, the migration runner creates a SQLite-consistent rollback snapshot and restores it if migration or verification fails.
+- `.expensemanager-backup` files are unencrypted ZIP archives containing a manifest, per-file SHA-256 checksums, configuration files, and online SQLite snapshots. Derived state, caches, and logs are excluded.
+- Restore rejects absolute/traversal paths, validates every checksum, stages both config and data roots, and swaps them into place with rollback on failure.
+- Settings & Storage reports each config/data/state/cache/log file and allows generated material to be removed independently.
+- Packaged uninstall invokes `main.py --uninstall`, which explicitly asks whether databases and configuration should be retained. Direct OS package removal intentionally preserves per-user data.
+
+## Release And Performance Verification
+
+- `uv.lock` is the dependency source for development and both package scripts.
+- `expense_manager_pyqt.spec` creates a one-directory executable with application assets, card definitions, icons, and lazy UI modules.
+- `scripts/package_linux.sh` stages and validates the Debian application layout; `scripts/package_windows.ps1` builds the equivalent Windows directory and optional Inno Setup wrapper.
+- `benchmarks/profile_analytics.py` seeds repeatable SQLite fixtures and measures only insight loading/generation/persistence. Optional `cProfile` and `tracemalloc` modes expose hot paths and peak allocations.
 
 `expenses.rebuild` is treated as a fully blocking UI job at the window layer from the start of the rebuild.
 `expenses.refresh` is only promoted to the blocking overlay once ingestion has finished and the app is entering analytics/materialization. Mailbox scanning itself stays interactive so routine reloads do not pause the whole window unnecessarily.

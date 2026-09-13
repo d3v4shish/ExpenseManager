@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ExpenseManager
+Comment=Local-first expense analytics workstation
+Exec=/usr/bin/expense-manager
+Icon=expense-manager
+Terminal=false
+Categories=Office;Finance;

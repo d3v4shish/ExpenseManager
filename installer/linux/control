@@ -1,0 +1,8 @@
+Package: expense-manager
+Version: 0.2.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: ExpenseManager <expense-manager@example.invalid>
+Description: Local-first desktop expense analytics workstation
+ An offline PyQt application for bank-email expense ingestion and explainable spend analysis.

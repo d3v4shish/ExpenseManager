@@ -4,18 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "expense-manager-pyqt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone PyQt expense manager."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "PyQt6>=6.6",
+  "numpy>=2.0",
   "paramiko>=3.4",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pyinstaller>=6.0",
+  "pyperf>=2.7",
+  "psutil>=6.0",
 ]
 
 [tool.setuptools.packages.find]

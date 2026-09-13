@@ -125,7 +125,8 @@ class BusyOverlay(QWidget):
                 f"{percent}% complete | {processed}/{total}\nInput is paused until the local expense database is ready."
             )
         else:
-            self.detail_label.setText("Input is paused until the local expense database is ready.")
+            scanned = f"{processed:,} messages scanned so far. " if processed > 0 else ""
+            self.detail_label.setText(f"{scanned}Input is paused until the local expense database is ready.")
 
     def show_overlay(self) -> None:
         """Show the overlay and start capturing input."""

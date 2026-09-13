@@ -100,6 +100,19 @@ class ThunderbirdValidationTests(unittest.TestCase):
             self.assertEqual(profiles[0]["accounts"][0]["email"], "bank@example.test")
             self.assertEqual(profiles[0]["accounts"][0]["defaultMailboxRel"], "ImapMail/imap.example.test/Inbox")
 
+    def test_default_profile_discovery_checks_each_home_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            homes_root = Path(temp_dir) / "home"
+            self._write_profile(homes_root / "alice", "alice@example.test")
+            self._write_profile(homes_root / "bob", "bob@example.test")
+
+            profiles = discover_default_thunderbird_profiles(homes_root=homes_root)
+
+            self.assertEqual(
+                {profile["accounts"][0]["email"] for profile in profiles if profile.get("accounts")},
+                {"alice@example.test", "bob@example.test"},
+            )
+
     def test_validation_reports_missing_config(self) -> None:
         service = self._service({}, missing=True)
 
@@ -114,6 +127,26 @@ class ThunderbirdValidationTests(unittest.TestCase):
             parser_chain=None,
             config_store=_ConfigStore(payload, missing=missing),
             thunderbird_local_path=Path("/missing/thunderbird.json"),
+        )
+
+    @staticmethod
+    def _write_profile(home: Path, email: str) -> None:
+        profile = home / ".thunderbird" / "fixture.default-release"
+        mailbox_root = profile / "ImapMail" / "imap.example.test"
+        mailbox_root.mkdir(parents=True)
+        (mailbox_root / "Inbox").write_text("", encoding="utf-8")
+        (profile / "prefs.js").write_text(
+            "\n".join(
+                [
+                    'user_pref("mail.account.account1.server", "server1");',
+                    'user_pref("mail.account.account1.identities", "id1");',
+                    f'user_pref("mail.identity.id1.useremail", "{email}");',
+                    'user_pref("mail.server.server1.type", "imap");',
+                    'user_pref("mail.server.server1.name", "Example Mail");',
+                    'user_pref("mail.server.server1.directory-rel", "[ProfD]ImapMail/imap.example.test");',
+                ]
+            ),
+            encoding="utf-8",
         )
 
 

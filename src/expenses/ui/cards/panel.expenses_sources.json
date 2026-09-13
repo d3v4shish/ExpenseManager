@@ -1,0 +1,8 @@
+{
+  "id": "panel.expenses_sources",
+  "widget": "ExpensesSourcesWidget",
+  "title": "Sources",
+  "subtitle": "Manage local, offline import sources and review possible duplicates.",
+  "datasource": { "files": ["email_accounts.json"] },
+  "visibility": { "defaultVisible": false }
+}

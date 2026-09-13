@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 
@@ -18,6 +18,7 @@ class ExpensesOverviewWidget(BaseWidget):
         super().__init__(widget_config, widget_data, theme, screen_api, window_api, parent)
         self.rebuild_running = False
         self.rebuild_job_label = ""
+        self._compact_layout = False
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(0, 0, 0, 0)
         self.root.setSpacing(0)
@@ -42,11 +43,25 @@ class ExpensesOverviewWidget(BaseWidget):
         meta = self.widget_data.get("meta", {})
         top_vendor = self.widget_data.get("topVendor", {})
         recent = self.widget_data.get("recent", [])
+        compact = self.width() > 0 and self.width() < 960
+
+        if compact:
+            grid.addWidget(self._build_metric_cell("Month total", self._format_overview_total("month"), accent=self._tone("blue"), right=True, bottom=True), 0, 0)
+            grid.addWidget(self._build_metric_cell("Year to date", self._format_overview_total("year"), accent=self._tone("amber"), right=False, bottom=True), 0, 1)
+            grid.addWidget(self._build_metric_cell("Ignored / New insights", f"{int(meta.get('ignoredCount', 0) or 0):03d} / {self._unread_insight_count():03d}", accent=self._tone("rose"), right=True, bottom=True), 1, 0)
+            grid.addWidget(self._build_status_cell(right=False, bottom=True), 1, 1)
+            grid.addWidget(self._build_concentration_cell(top_vendor), 2, 0, 1, 2)
+            grid.addWidget(self._build_trend_cell(recent), 3, 0, 1, 2)
+            for row in range(4):
+                grid.setRowMinimumHeight(row, self.GRID_CELL_HEIGHT)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            return host
 
         grid.addWidget(
             self._build_metric_cell(
                 "Month total",
-                self._format_metric_number(float(summary.get("month", 0.0) or 0.0)),
+                self._format_overview_total("month"),
                 accent=self._tone("blue"),
                 right=True,
                 bottom=True,
@@ -58,8 +73,8 @@ class ExpensesOverviewWidget(BaseWidget):
         )
         grid.addWidget(
             self._build_metric_cell(
-                "Projected year",
-                self._format_metric_number(float(summary.get("year", 0.0) or 0.0)),
+                "Year to date",
+                self._format_overview_total("year"),
                 accent=self._tone("amber"),
                 right=True,
                 bottom=True,
@@ -71,8 +86,8 @@ class ExpensesOverviewWidget(BaseWidget):
         )
         grid.addWidget(
             self._build_metric_cell(
-                "Ignored rows",
-                f"{int(meta.get('ignoredCount', 0) or 0):03d}",
+                "Ignored / New insights",
+                f"{int(meta.get('ignoredCount', 0) or 0):03d} / {self._unread_insight_count():03d}",
                 accent=self._tone("rose"),
                 right=True,
                 bottom=True,
@@ -91,6 +106,13 @@ class ExpensesOverviewWidget(BaseWidget):
         for column in range(6):
             grid.setColumnStretch(column, 1)
         return host
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        compact = self.width() < 960
+        if compact != self._compact_layout:
+            self._compact_layout = compact
+            QTimer.singleShot(0, self._render)
+        super().resizeEvent(event)
 
     def _build_metric_cell(self, label: str, value: str, *, accent: str, right: bool, bottom: bool) -> QWidget:
         """Render one tall metric tile."""
@@ -149,6 +171,10 @@ class ExpensesOverviewWidget(BaseWidget):
         config_button.clicked.connect(self._toggle_mail_config_pane)
         actions.addWidget(config_button, 1)
 
+        insights_button = self._make_status_control_button("Insights")
+        insights_button.clicked.connect(lambda: self.navigate_to("insights"))
+        actions.addWidget(insights_button, 1)
+
         rebuild_button = self._make_rebuild_button()
         rebuild_button.clicked.connect(self._trigger_rebuild)
         actions.addWidget(rebuild_button, 1)
@@ -169,7 +195,7 @@ class ExpensesOverviewWidget(BaseWidget):
         row.setSpacing(14)
 
         vendor_name = self._truncate(str(top_vendor.get("vendor", "No top vendor")), 28)
-        vendor_amount = self._format_inr(float(top_vendor.get("amount", 0.0) or 0.0))
+        vendor_amount = self._format_inr(float(top_vendor.get("amount", 0.0) or 0.0), str(top_vendor.get("currency", "INR")))
 
         heading = QVBoxLayout()
         heading.setContentsMargins(0, 0, 0, 0)
@@ -218,7 +244,7 @@ class ExpensesOverviewWidget(BaseWidget):
         track_layout.addWidget(fill, fill_percent)
         track_layout.addStretch(max(1, 100 - fill_percent))
         row.addWidget(track, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self._make_value_label(f"{fill_percent:02d}%", 11, color=self.theme.hex("text_secondary")), 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._make_value_label(f"{fill_percent:02d}%" if fill_percent else "—", 11, color=self.theme.hex("text_secondary")), 0, Qt.AlignmentFlag.AlignVCenter)
         return cell
 
     def _build_cell_shell(
@@ -376,23 +402,14 @@ class ExpensesOverviewWidget(BaseWidget):
         return button
 
     def _make_config_toggle_button(self):
-        """Create the compact status-tile trigger for the hidden config pane."""
+        """Create the compact trigger for the mail-configuration popup."""
 
-        is_open = self.is_card_visible("panel.expenses_config")
-        if is_open:
-            button = make_button(
-                "HIDE CFG",
-                self.theme.hex("accent"),
-                self.theme.hex("text_primary"),
-                self.theme.hex("surface_active"),
-            )
-        else:
-            button = make_button(
-                "MAIL CFG",
-                self.theme.hex("divider", self.theme.hex("border")),
-                self.theme.hex("text_primary"),
-                self.theme.hex("surface_panel_alt"),
-            )
+        button = make_button(
+            "MAIL CFG",
+            self.theme.hex("divider", self.theme.hex("border")),
+            self.theme.hex("text_primary"),
+            self.theme.hex("surface_panel_alt"),
+        )
         button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         button.setMinimumHeight(30)
         button.setMaximumHeight(30)
@@ -400,7 +417,7 @@ class ExpensesOverviewWidget(BaseWidget):
         font = button.font()
         font.setPointSize(9)
         button.setFont(font)
-        border_color = self.theme.hex("accent") if is_open else self.theme.hex("divider", self.theme.hex("border"))
+        border_color = self.theme.hex("divider", self.theme.hex("border"))
         button.setStyleSheet(
             button.styleSheet()
             + f"""
@@ -411,7 +428,7 @@ class ExpensesOverviewWidget(BaseWidget):
             }}
             """
         )
-        button.setToolTip("Show or hide the Thunderbird account config pane.")
+        button.setToolTip("Open Thunderbird mail configuration without moving the dashboard.")
         return button
 
     def _mono_font(self, size: int, *, bold: bool, letter_spacing: float = 0.0) -> QFont:
@@ -430,6 +447,8 @@ class ExpensesOverviewWidget(BaseWidget):
             return "Syncing"
         if (self.rebuild_job_label or "").strip().lower() == "refresh failed":
             return "Refresh failed"
+        if not bool(self.widget_data.get("meta", {}).get("sourceReady", True)):
+            return "Setup needed"
         return "Ready"
 
     def _system_status_color(self) -> str:
@@ -439,6 +458,8 @@ class ExpensesOverviewWidget(BaseWidget):
             return self.theme.hex("warning")
         if (self.rebuild_job_label or "").strip().lower() == "refresh failed":
             return self.theme.hex("rose")
+        if not bool(self.widget_data.get("meta", {}).get("sourceReady", True)):
+            return self.theme.hex("amber")
         return self.theme.hex("emerald")
 
     def _status_note_text(self) -> str:
@@ -448,13 +469,15 @@ class ExpensesOverviewWidget(BaseWidget):
             return self.rebuild_job_label or "Mailbox and ledger are updating."
         if (self.rebuild_job_label or "").strip().lower() == "refresh failed":
             return "Use Rebuild to refresh the ledger."
+        if not bool(self.widget_data.get("meta", {}).get("sourceReady", True)):
+            return str(self.widget_data.get("meta", {}).get("sourceMessage", "Configure a Thunderbird account to start syncing."))
         return ""
 
     def _trend_fill_percent(self, recent: list[dict]) -> int:
         """Return the compact trend fill percentage."""
 
         if not recent:
-            return 16
+            return 0
         amounts = [float(item.get("amount", 0.0) or 0.0) for item in recent[:5]]
         peak = max(amounts) or 1.0
         latest = amounts[0] if amounts else 0.0
@@ -492,10 +515,25 @@ class ExpensesOverviewWidget(BaseWidget):
         self.screen_api.run_refresh()
 
     def _toggle_mail_config_pane(self) -> None:
-        """Show or hide the Thunderbird account config pane."""
+        """Open the Thunderbird account popup without changing dashboard layout."""
 
-        self.toggle_card("panel.expenses_config", scroll_into_view=True)
-        self._render()
+        callback = getattr(self.window_api, "open_mail_config_dialog", None)
+        if callable(callback):
+            callback()
+        else:
+            self.toggle_card("panel.expenses_config", scroll_into_view=True)
+
+    def _unread_insight_count(self) -> int:
+        """Return the lightweight persisted unread count for the overview strip."""
+
+        callback = getattr(self.screen_api, "unread_insight_count", None)
+        if not callable(callback):
+            return 0
+        try:
+            return max(0, int(callback() or 0))
+        except Exception:  # noqa: BLE001
+            self.logger.exception("Could not load unread insight count")
+            return 0
 
     def set_job_state(self, job_id: str, running: bool, payload: dict | None = None) -> None:
         """Update the status label while refresh jobs run."""
@@ -525,7 +563,22 @@ class ExpensesOverviewWidget(BaseWidget):
         }
         return styles.get(tone, self.theme.hex("accent"))
 
-    def _format_inr(self, value: float) -> str:
-        """Format one numeric amount for the overview cards."""
+    def _format_overview_total(self, period: str) -> str:
+        """Show per-currency totals without combining incomparable money values."""
 
-        return f"INR {value:,.0f}" if value else "INR 0"
+        summaries = self.widget_data.get("summaryByCurrency", {})
+        if not isinstance(summaries, dict) or not summaries:
+            summary = self.widget_data.get("summary", {})
+            return self._format_inr(float(summary.get(period, 0.0) or 0.0), "INR")
+        values = [
+            self._format_inr(float(metrics.get(period, 0.0) or 0.0), str(currency))
+            for currency, metrics in summaries.items()
+            if isinstance(metrics, dict)
+        ]
+        return " · ".join(values) if values else "INR 0"
+
+    def _format_inr(self, value: float, currency: str = "INR") -> str:
+        """Format one numeric amount with its actual currency code."""
+
+        code = str(currency or "INR").strip().upper() or "INR"
+        return f"{code} {value:,.0f}" if value else f"{code} 0"

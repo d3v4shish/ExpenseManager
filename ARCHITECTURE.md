@@ -1,0 +1,9 @@
+# Architecture
+
+The detailed architecture is maintained in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The runtime is a local-first PyQt desktop app: background source providers normalize records, parsers create bank-transaction facts, SQLite materializes a ledger with provenance, exact-identity reconciliation, and fuzzy-duplicate decisions, and UI cards render prepared local state.
+
+No source uploads financial data. AxiosAlternative is an offline archive import; live device synchronization is not implemented.
+
+CSV, SMS backup, EML-folder, and Axios archive sources are snapshot reconciled after a successful changed scan; Thunderbird remains incremental. Exact identity is bank, account, direction, transaction reference, and normalized transaction minute. Equal values consolidate with all provenance; differing amount/currency/merchant values become a persisted conflict, a single provisional ledger row, and a user-selectable or explicitly source-priority-resolved value. Stored email candidates can also be clustered by a bounded local Drain-style miner; it masks volatile values and produces review-only declarative-rule drafts. It does not modify active rules or parse incoming messages adaptively.
+
+The packaged entrypoint is dual-mode: no arguments (or `gui`) starts PyQt, while every other command is parsed by the headless CLI. `src/app/reports.py` provides versioned, bounded, privacy-filtered JSON reports over the same services/repositories that supply GUI state; it never imports widgets or serializes widget state. `reconciliation list`, `resolve`, and `set-policy` use the same services as the Sources conflict queue; `templates mine` and `templates draft` expose the Mail Debug miner without returning message bodies. Raw email/SMS bodies, source payloads/revisions, raw rules, and raw config files are excluded from reports.

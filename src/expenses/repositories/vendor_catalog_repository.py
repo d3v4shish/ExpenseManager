@@ -6,11 +6,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.expenses.repositories.sqlite_db import connect_sqlite
+from src.expenses.repositories.sqlite_db import connect_sqlite, ensure_versioned_schema
 
 
 class VendorCatalogRepository:
     """Persist the expenses vendor catalog in the app-owned database namespace."""
+
+    SCHEMA_COMPONENT = "vendor_catalog"
+    SCHEMA_VERSION = 1
 
     def __init__(self, db_path: Path) -> None:
         """Store the database path and initialize the vendor catalog schema."""
@@ -28,7 +31,14 @@ class VendorCatalogRepository:
     def ensure_schema(self) -> None:
         """Create the vendor catalog schema and backfill legacy columns."""
 
-        with self._connect() as conn:
+        ensure_versioned_schema(
+            self.db_path,
+            component=self.SCHEMA_COMPONENT,
+            target_version=self.SCHEMA_VERSION,
+            migrate=self._ensure_schema_objects,
+        )
+
+    def _ensure_schema_objects(self, conn: sqlite3.Connection) -> None:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS vendors (

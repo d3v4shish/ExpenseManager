@@ -36,6 +36,8 @@ def load_email_accounts_config(files) -> dict[str, Any]:
     return {
         "providers": copy.deepcopy(providers) if isinstance(providers, list) else [],
         "sync": _normalized_sync(sync),
+        "sourceFeatures": copy.deepcopy(payload.get("sourceFeatures", {})) if isinstance(payload.get("sourceFeatures", {}), dict) else {},
+        "reconciliation": copy.deepcopy(payload.get("reconciliation", {})) if isinstance(payload.get("reconciliation", {}), dict) else {},
     }
 
 
@@ -163,6 +165,11 @@ def rewrite_managed_thunderbird_provider(
         providers.insert(0, managed_provider)
 
     return {
+        **{
+            key: copy.deepcopy(value)
+            for key, value in email_config.items()
+            if key not in {"providers", "sync"}
+        },
         "providers": providers,
         "sync": _normalized_sync(email_config.get("sync", {})),
     }
@@ -207,6 +214,7 @@ def build_expense_mail_config_snapshot(files, repository) -> dict[str, Any]:
         "selectedMailboxPath": selected_mailboxes[0] if selected_mailboxes else "",
         "selectedMailboxPaths": selected_mailboxes,
         "sync": _normalized_sync(email_config.get("sync", {})),
+        "reconciliation": copy.deepcopy(email_config.get("reconciliation", {})) if isinstance(email_config.get("reconciliation", {}), dict) else {},
         "accountDb": account_db,
     }
 

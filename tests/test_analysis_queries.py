@@ -170,6 +170,77 @@ class AnalysisQueryTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["loadedTransactionCount"], 200)
         self.assertEqual(len(payload["transactions"]), 200)
         self.assertEqual(payload["selectedVendorDetail"], {})
+        self.assertEqual(payload["selectedMetrics"]["transactionCount"], 240)
+        self.assertEqual(payload["selectedMetrics"]["debitCount"], 240)
+        self.assertEqual(payload["selectedMetrics"]["debitTotal"], sum(range(1, 241)))
+        self.assertEqual(payload["selectedTopVendor"]["count"], 48)
+
+    def test_analysis_snapshot_supports_all_months(self) -> None:
+        self.repository.upsert_transactions(
+            [
+                self._transaction("txn-june", "2026-06-03T10:00:00+05:30", "Grocer", "grocer", 120.0),
+                self._transaction("txn-may", "2026-05-02T10:00:00+05:30", "Cafe", "cafe", 80.0),
+            ]
+        )
+        service = ExpensesService(
+            expenses_repository=self.repository,
+            mail_ingestion_service=None,
+            state_store=_StateStore(),
+            vendor_catalog_service=None,
+        )
+
+        payload = service.build_analysis_snapshot(year=2026, month=0)
+
+        self.assertEqual(payload["selectedRange"], {"year": 2026, "month": 0})
+        self.assertEqual(payload["selectedMetrics"]["transactionCount"], 2)
+        self.assertEqual(payload["selectedMetrics"]["debitTotal"], 200.0)
+        self.assertEqual(payload["selectedMonthDaily"], [])
+        self.assertEqual(payload["selectedMonthWeekly"], [])
+
+    def test_analysis_snapshot_keeps_currencies_separate(self) -> None:
+        inr = self._transaction("txn-inr", "2026-06-03T10:00:00+05:30", "Grocer", "grocer", 120.0)
+        usd = self._transaction("txn-usd", "2026-06-04T10:00:00+05:30", "Book shop", "books", 25.0)
+        usd["currency"] = "USD"
+        self.repository.upsert_transactions([inr, usd])
+        service = ExpensesService(
+            expenses_repository=self.repository,
+            mail_ingestion_service=None,
+            state_store=_StateStore(),
+            vendor_catalog_service=None,
+        )
+
+        inr_payload = service.build_analysis_snapshot(year=2026, month=6, currency="INR")
+        usd_payload = service.build_analysis_snapshot(year=2026, month=6, currency="USD")
+
+        self.assertEqual(inr_payload["selectedMetrics"]["debitTotal"], 120.0)
+        self.assertEqual(usd_payload["selectedMetrics"]["debitTotal"], 25.0)
+        self.assertEqual(inr_payload["filters"]["availableCurrencies"], ["INR", "USD"])
+
+    def test_analysis_snapshot_bounds_large_vendor_directory(self) -> None:
+        self.repository.upsert_transactions(
+            [
+                self._transaction(
+                    f"txn-vendor-{index}",
+                    "2026-06-03T10:00:00+05:30",
+                    f"Vendor {index}",
+                    f"vendor-{index}",
+                    float(index + 1),
+                )
+                for index in range(1_005)
+            ]
+        )
+        service = ExpensesService(
+            expenses_repository=self.repository,
+            mail_ingestion_service=None,
+            state_store=_StateStore(),
+            vendor_catalog_service=None,
+        )
+
+        payload = service.build_analysis_snapshot(year=2026, month=6)
+
+        self.assertEqual(payload["selectedMetrics"]["transactionCount"], 1_005)
+        self.assertEqual(len(payload["vendorDirectory"]), service.VENDOR_DIRECTORY_LIMIT)
+        self.assertTrue(payload["meta"]["vendorDirectoryTruncated"])
 
     def _transaction(self, key: str, timestamp: str, vendor: str, alias_key: str, amount: float) -> dict:
         return {

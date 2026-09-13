@@ -1,0 +1,9 @@
+{
+  "id": "panel.expenses_settings",
+  "widget": "ExpenseSettingsWidget",
+  "title": "Settings & Storage",
+  "subtitle": "Runtime behavior, local analytics, backups, cleanup, and data retention.",
+  "visibility": {
+    "defaultVisible": false
+  }
+}

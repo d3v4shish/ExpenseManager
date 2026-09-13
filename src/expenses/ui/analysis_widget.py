@@ -11,29 +11,35 @@ from typing import Any
 from PyQt6.QtCore import QRectF, Qt, QThreadPool, QTimer, QStringListModel
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCompleter,
     QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QScrollArea,
     QSizePolicy,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from src.app.ui_kit import BaseWidget, CardFrame, Dot, PillLabel, SectionCard, make_button, make_label
 from src.expenses.ui.analysis_workers import (
+    AnalysisSnapshotWorker,
     LedgerGroupsWorker,
     LedgerRowsWorker,
     TransactionMutationWorker,
     VendorDetailWorker,
     VendorMutationWorker,
+    SourceProvenanceWorker,
 )
+from src.expenses.ui.transaction_table import TransactionTableModel
 
 
 def _analysis_hex(theme, role: str) -> str:
@@ -101,6 +107,8 @@ class MiniBarChart(QWidget):
         if callable(on_bar_clicked):
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self.setMouseTracking(True)
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.setAccessibleName(f"Interactive chart: {title}")
         self.setMinimumHeight(250)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -224,6 +232,24 @@ class MiniBarChart(QWidget):
                     self.on_bar_clicked(item)
                     break
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if not callable(self.on_bar_clicked) or not self.series:
+            super().keyPressEvent(event)
+            return
+        if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Right}:
+            delta = -1 if event.key() == Qt.Key.Key_Left else 1
+            current = self.hovered_bar_index if self.hovered_bar_index >= 0 else 0
+            self.hovered_bar_index = max(0, min(len(self.series) - 1, current + delta))
+            self.update()
+            event.accept()
+            return
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            index = self.hovered_bar_index if self.hovered_bar_index >= 0 else 0
+            self.on_bar_clicked(dict(self.series[index]))
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if not callable(self.on_bar_clicked):
@@ -423,6 +449,7 @@ class ResponsiveLedgerHeaderControls(QWidget):
         self._compact_mode = False
         self._year_widget: QWidget | None = None
         self._month_widget: QWidget | None = None
+        self._currency_widget: QWidget | None = None
         self._search_widget: QWidget | None = None
         self._ignored_widget: QWidget | None = None
         self._layout = QGridLayout(self)
@@ -431,11 +458,12 @@ class ResponsiveLedgerHeaderControls(QWidget):
         self._layout.setVerticalSpacing(8)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-    def set_controls(self, *, year_widget: QWidget, month_widget: QWidget, search_widget: QWidget, ignored_widget: QWidget) -> None:
+    def set_controls(self, *, year_widget: QWidget, month_widget: QWidget, currency_widget: QWidget, search_widget: QWidget, ignored_widget: QWidget) -> None:
         """Bind the current control widgets and lay them out immediately."""
 
         self._year_widget = year_widget
         self._month_widget = month_widget
+        self._currency_widget = currency_widget
         self._search_widget = search_widget
         self._ignored_widget = ignored_widget
         self._reflow()
@@ -456,31 +484,33 @@ class ResponsiveLedgerHeaderControls(QWidget):
             if widget is not None:
                 widget.setParent(self)
 
-    def _reset_stretch(self, columns: int = 4) -> None:
+    def _reset_stretch(self, columns: int = 5) -> None:
         for column in range(columns):
             self._layout.setColumnStretch(column, 0)
 
     def _reflow(self) -> None:
         self._clear_layout()
         self._reset_stretch()
-        if not all([self._year_widget, self._month_widget, self._search_widget, self._ignored_widget]):
+        if not all([self._year_widget, self._month_widget, self._currency_widget, self._search_widget, self._ignored_widget]):
             self.updateGeometry()
             return
 
         if self._compact_mode:
             self._layout.addWidget(self._year_widget, 0, 0)
             self._layout.addWidget(self._month_widget, 0, 1)
-            self._layout.addWidget(self._ignored_widget, 0, 2, 1, 1, Qt.AlignmentFlag.AlignBottom)
-            self._layout.addWidget(self._search_widget, 1, 0, 1, 3)
-            self._layout.setColumnStretch(2, 1)
+            self._layout.addWidget(self._currency_widget, 0, 2)
+            self._layout.addWidget(self._ignored_widget, 0, 3, 1, 1, Qt.AlignmentFlag.AlignBottom)
+            self._layout.addWidget(self._search_widget, 1, 0, 1, 4)
+            self._layout.setColumnStretch(3, 1)
             self.updateGeometry()
             return
 
         self._layout.addWidget(self._year_widget, 0, 0)
         self._layout.addWidget(self._month_widget, 0, 1)
-        self._layout.addWidget(self._search_widget, 0, 2)
-        self._layout.addWidget(self._ignored_widget, 0, 3, 1, 1, Qt.AlignmentFlag.AlignBottom)
-        self._layout.setColumnStretch(2, 1)
+        self._layout.addWidget(self._currency_widget, 0, 2)
+        self._layout.addWidget(self._search_widget, 0, 3)
+        self._layout.addWidget(self._ignored_widget, 0, 4, 1, 1, Qt.AlignmentFlag.AlignBottom)
+        self._layout.setColumnStretch(3, 1)
         self.updateGeometry()
 
 
@@ -491,6 +521,8 @@ class ClickableLabel(QLabel):
         self.hover_color   = hover_color
         self.callback      = callback
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(text)
         font = self.font()
         font.setBold(bold)
         font.setPointSize(size)
@@ -510,21 +542,37 @@ class ClickableLabel(QLabel):
             self.callback()
         super().mousePressEvent(event)
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space} and callable(self.callback):
+            self.callback()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _apply_color(self, color: str) -> None:
         self.setStyleSheet(f"QLabel {{ color: {color}; background: transparent; border: none; padding: 0px; }}")
 
 
 class ClickableCardFrame(CardFrame):
     def __init__(self, *args, on_click=None, **kwargs) -> None:
+        kwargs["hover_effect"] = callable(on_click)
         super().__init__(*args, **kwargs)
         self.on_click = on_click
         if callable(on_click):
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if callable(self.on_click):
             self.on_click()
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space} and callable(self.on_click):
+            self.on_click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class TransactionPopupDialog(QDialog):
@@ -544,37 +592,102 @@ class TransactionPopupDialog(QDialog):
         self.meta_label.setWordWrap(True)
         self.root.addWidget(self.title_label)
         self.root.addWidget(self.meta_label)
+        self.source_filter = QComboBox()
+        self.source_filter.setAccessibleName("Filter transactions by source")
+        self.source_filter.currentIndexChanged.connect(self._apply_source_filter)
+        self.root.addWidget(self.source_filter)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.content = QWidget()
-        self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
-        self.content_layout.setSpacing(8)
-        self.scroll.setWidget(self.content)
-        self.root.addWidget(self.scroll, 1)
+        self.model = TransactionTableModel(
+            debit_color=QColor(_analysis_hex(theme, "debit")),
+            credit_color=QColor(_analysis_hex(theme, "credit")),
+            ignored_color=QColor(_analysis_hex(theme, "danger")),
+        )
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(False)
+        self.table.doubleClicked.connect(self._open_vendor)
+        self.root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
+        self.open_vendor_button = make_button("Open Vendor", theme.hex("accent"), theme.hex("text_primary"), theme.hex("card_alt_bg"))
+        self.ignore_button = make_button("Ignore / Restore", theme.hex("border"), theme.hex("text_primary"), theme.hex("card_alt_bg"))
+        self.provenance_button = make_button("Source Details", theme.hex("border"), theme.hex("text_primary"), theme.hex("card_alt_bg"))
+        self.open_vendor_button.clicked.connect(self._open_vendor)
+        self.ignore_button.clicked.connect(self._toggle_ignore)
+        self.provenance_button.clicked.connect(self._show_provenance)
+        footer.addWidget(self.open_vendor_button)
+        footer.addWidget(self.ignore_button)
+        footer.addWidget(self.provenance_button)
         footer.addStretch(1)
         close_button = make_button("Close", theme.hex("border"), theme.hex("text_primary"), theme.hex("card_alt_bg"))
         close_button.clicked.connect(self.accept)
         footer.addWidget(close_button)
         self.root.addLayout(footer)
 
-    def set_transactions(self, title: str, rows: list[dict[str, Any]], total_label: str, renderer) -> None:
+        self.on_open_vendor = None
+        self.on_toggle_ignore = None
+        self.on_show_provenance = None
+        self.all_rows: list[dict[str, Any]] = []
+
+    def set_transactions(self, title: str, rows: list[dict[str, Any]], total_label: str, on_open_vendor, on_toggle_ignore, on_show_provenance=None) -> None:
         self.setWindowTitle(title)
         self.title_label.setText(title)
         self.meta_label.setText(f"{len(rows)} row(s) | {total_label}")
-        self.content = QWidget()
-        self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
-        self.content_layout.setSpacing(8)
-        for row in rows:
-            self.content_layout.addWidget(renderer(row))
-        self.content_layout.addStretch(1)
-        self.scroll.setWidget(self.content)
+        self.on_open_vendor = on_open_vendor
+        self.on_toggle_ignore = on_toggle_ignore
+        self.on_show_provenance = on_show_provenance
+        self.provenance_button.setEnabled(callable(on_show_provenance))
+        self.all_rows = [dict(row) for row in rows]
+        current = self.source_filter.currentData()
+        self.source_filter.blockSignals(True)
+        self.source_filter.clear()
+        self.source_filter.addItem("All sources", "")
+        for provider in sorted({str(row.get("providerId", "")).strip() for row in self.all_rows if str(row.get("providerId", "")).strip()}):
+            self.source_filter.addItem(provider, provider)
+        index = self.source_filter.findData(current)
+        self.source_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.source_filter.blockSignals(False)
+        self._apply_source_filter()
+
+    def _apply_source_filter(self) -> None:
+        provider = str(self.source_filter.currentData() or "")
+        visible = [row for row in self.all_rows if not provider or str(row.get("providerId", "")) == provider]
+        self.model.set_rows(visible)
+        if visible:
+            self.table.selectRow(0)
+
+    def _selected_row(self) -> dict[str, Any]:
+        selected = self.table.selectionModel().selectedRows()
+        return self.model.row_at(selected[0].row()) if selected else {}
+
+    def _open_vendor(self, *_args) -> None:
+        row = self._selected_row()
+        if not row or not callable(self.on_open_vendor):
+            return
+        vendor = str(row.get("canonicalVendor") or row.get("vendor") or row.get("counterparty") or "Unknown")
+        vendor_key = str(row.get("aliasKey") or row.get("vendorKey") or vendor.lower())
+        self.on_open_vendor(vendor, vendor_key)
+
+    def _toggle_ignore(self) -> None:
+        row = self._selected_row()
+        if not row or not callable(self.on_toggle_ignore):
+            return
+        key = str(row.get("transactionKey", ""))
+        if key:
+            self.on_toggle_ignore(key, not bool(row.get("ignored")))
+            self.accept()
+
+    def _show_provenance(self) -> None:
+        row = self._selected_row()
+        key = str(row.get("transactionKey", ""))
+        if key and callable(self.on_show_provenance):
+            self.on_show_provenance(key)
 
 
 class LedgerRowCard(QFrame):
@@ -622,7 +735,8 @@ class LedgerRowCard(QFrame):
         direction        = str(row.get("direction", "")).strip().lower()
         amount           = float(row.get("amount", 0.0) or 0.0)
         transaction_key  = str(row.get("transactionKey", "")).strip()
-        amount_label     = f"INR {amount:,.0f}" if abs(amount) >= 1 else f"INR {amount:,.2f}"
+        currency         = str(row.get("currency", "INR") or "INR").strip().upper() or "INR"
+        amount_label     = f"{currency} {amount:,.0f}" if abs(amount) >= 1 else f"{currency} {amount:,.2f}"
         if direction == "credit":
             amount_label = f"+ {amount_label}"
 
@@ -666,6 +780,7 @@ class ExpensesAnalysisWidget(BaseWidget):
 
         self.selected_year                                                            = datetime.now().year
         self.selected_month                                                           = datetime.now().month
+        self.selected_currency                                                        = "INR"
         self.selected_page                                                            = 1
         self.page_size                                                                = 200
         self.show_ignored                                                             = False
@@ -709,6 +824,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         self.insights_container                                                       = None
         self.year_combo                                                               = None
         self.month_combo                                                              = None
+        self.currency_combo                                                           = None
         self.vendor_thread_pool                                                       = QThreadPool.globalInstance()
         self.ledger_rows_thread_pool                                                  = QThreadPool.globalInstance()
         self.ledger_groups_thread_pool                                                = QThreadPool.globalInstance()
@@ -737,6 +853,10 @@ class ExpensesAnalysisWidget(BaseWidget):
         self._active_ledger_rows_request_id                                           = 0
         self._active_ledger_rows_request_key: tuple[Any, ...] | None                  = None
         self._pending_ledger_request: dict[str, Any] | None                           = None
+        self.analysis_snapshot_busy                                                  = False
+        self.analysis_snapshot_error                                                 = ""
+        self._analysis_snapshot_request_id                                           = 0
+        self.analysis_snapshot_thread_pool                                           = QThreadPool.globalInstance()
 
         self.ledger_search_timer = QTimer(self)
         self.ledger_search_timer.setSingleShot(True)
@@ -880,17 +1000,23 @@ class ExpensesAnalysisWidget(BaseWidget):
         filters         = self.widget_data.get("filters", {})
         available_years = list(filters.get("availableYears", [])) or [datetime.now().year]
         default_year    = int(filters.get("defaultYear", datetime.now().year) or datetime.now().year)
-        default_month   = int(filters.get("defaultMonth", datetime.now().month) or datetime.now().month)
+        raw_default_month = filters.get("defaultMonth", datetime.now().month)
+        default_month   = int(datetime.now().month if raw_default_month is None else raw_default_month)
+        available_currencies = [str(value).strip().upper() for value in filters.get("availableCurrencies", []) if str(value).strip()] or ["INR"]
+        default_currency = str(filters.get("defaultCurrency", available_currencies[0]) or available_currencies[0]).strip().upper()
         page_size       = int(filters.get("pageSize", 200) or 200)
 
         if reset or self.selected_year not in available_years:
             self.selected_year = default_year if default_year in available_years else available_years[0]
         if reset:
             self.selected_month = default_month
+            self.selected_currency = default_currency
 
         valid_months = {int(item.get("value", 0) or 0) for item in filters.get("availableMonths", [])}
         if self.selected_month not in valid_months:
             self.selected_month = default_month
+        if self.selected_currency not in available_currencies:
+            self.selected_currency = default_currency
 
         self.page_size     = max(25, page_size)
         self.selected_page = max(1, self.selected_page)
@@ -969,6 +1095,19 @@ class ExpensesAnalysisWidget(BaseWidget):
         month_combo.currentIndexChanged.connect(lambda _: self._month_changed(month_combo.currentData()))
         month_box = self._labeled_control("Month", month_combo)
 
+        currency_combo = QComboBox()
+        self.currency_combo = currency_combo
+        currency_combo.setStyleSheet(self._combo_style())
+        for currency in self.widget_data.get("filters", {}).get("availableCurrencies", ["INR"]):
+            code = str(currency).strip().upper()
+            if code:
+                currency_combo.addItem(code, code)
+        currency_index = currency_combo.findData(self.selected_currency)
+        if currency_index >= 0:
+            currency_combo.setCurrentIndex(currency_index)
+        currency_combo.currentIndexChanged.connect(lambda _: self._currency_changed(currency_combo.currentData()))
+        currency_box = self._labeled_control("Currency", currency_combo)
+
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search ledger...")
         self.search_input.setText(self.pending_ledger_text or self.ledger_search_text)
@@ -992,6 +1131,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         filters.set_controls(
             year_widget=year_box,
             month_widget=month_box,
+            currency_widget=currency_box,
             search_widget=search_box,
             ignored_widget=ignored_toggle,
         )
@@ -1001,7 +1141,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         progress       = self._expense_background()
         total_rows     = int(self.widget_data.get("meta", {}).get("visibleTransactionCount", len(self.widget_data.get("transactions", []))) or 0)
         running        = bool(progress.get("running"))
-        initial_update = total_rows == 0 and int(progress.get("percent", 0) or 0) < 100
+        initial_update = running and total_rows == 0 and int(progress.get("percent", 0) or 0) < 100
         if not running and not initial_update:
             return None
 
@@ -1023,23 +1163,22 @@ class ExpensesAnalysisWidget(BaseWidget):
         return card
 
     def _build_summary(self) -> QGridLayout:
-        month_rows      = self._selected_rows()
-        month_debits    = [row for row in month_rows if self._direction(row) == "debit"]
-        top_vendor      = self._top_vendor(month_debits)
+        metrics         = dict(self.widget_data.get("selectedMetrics", {}))
+        top_vendor      = dict(self.widget_data.get("selectedTopVendor", {})) or {"vendor": "None", "vendorKey": "", "amount": 0.0}
         all_time_top    = dict(self.widget_data.get("allTimeInsights", {}).get("topVendorByAmount", {})) or self._top_vendor(self._visible_rows(direction="debit"))
         if not all_time_top.get("vendor"):
             all_time_top = {"vendor": "None", "vendorKey": "", "amount": 0.0}
-        month_spend     = sum(self._amount(row) for row in month_debits)
-        month_count     = len(month_rows)
-        active_days     = len({row.get("dayOnlyLabel", "") for row in month_debits})
-        avg_active_day  = month_spend / max(active_days, 1)
-        avg_transaction = self._average(month_debits)
+        month_spend     = float(metrics.get("debitTotal", 0.0) or 0.0)
+        month_count     = int(metrics.get("transactionCount", 0) or 0)
+        active_days     = int(metrics.get("activeDebitDays", 0) or 0)
+        avg_active_day  = float(metrics.get("averageActiveDay", 0.0) or 0.0)
+        avg_transaction = float(metrics.get("averageDebit", 0.0) or 0.0)
 
         cards = [
             {
                 "title": "Selected Spend",
                 "value": self._format_inr(month_spend),
-                "note": "Current month debit total",
+                    "note": "Selected period debit total",
                 "tone": self._ui_color("interactive"),
                 "on_click": self._show_selected_spend_popup,
                 "accented": True,
@@ -1047,7 +1186,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             {
                 "title": "Transactions",
                 "value": str(month_count),
-                "note": "Debit and credit rows in selected month",
+                    "note": "Debit and credit rows in selected period",
                 "tone": self._ui_color("info"),
                 "on_click": self._show_selected_spend_popup,
                 "accented": False,
@@ -1079,7 +1218,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             {
                 "title": "Avg Debit",
                 "value": self._format_inr(avg_transaction),
-                "note": "Average debit in selected month",
+                    "note": "Average debit in selected period",
                 "tone": self._ui_color("debit"),
                 "on_click": None,
                 "accented": False,
@@ -1112,14 +1251,14 @@ class ExpensesAnalysisWidget(BaseWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        month_debits  = [row for row in self._selected_rows() if self._direction(row) == "debit"]
         yearly_series = list(self.widget_data.get("selectedYearMonths", [])) or self._yearly_series([row for row in self._visible_rows(direction="debit") if self._year(row) == self.selected_year])
-        daily_series  = self._daily_series(month_debits)
-        weekly_series = self._weekly_series(month_debits)
+        daily_series  = list(self.widget_data.get("selectedMonthDaily", []))
+        weekly_series = list(self.widget_data.get("selectedMonthWeekly", []))
 
         chart_strip = ResponsiveChartStrip(one_row_breakpoint=1350, two_row_breakpoint=900)
-        chart_strip.set_cards(
-            [
+        chart_cards = []
+        if self.selected_month > 0:
+            chart_cards.extend([
                 self._chart_card(
                     self._month_title("Daily Debit"),
                     daily_series,
@@ -1134,6 +1273,8 @@ class ExpensesAnalysisWidget(BaseWidget):
                     compact=True,
                     chart_height=212,
                 ),
+            ])
+        chart_cards.append(
                 self._chart_card(
                     f"Monthly Debit Trend | {self.selected_year}",
                     yearly_series,
@@ -1141,9 +1282,9 @@ class ExpensesAnalysisWidget(BaseWidget):
                     active_value=self.selected_month,
                     compact=True,
                     chart_height=212,
-                ),
-            ]
+                )
         )
+        chart_strip.set_cards(chart_cards)
         layout.addWidget(chart_strip)
         return layout
 
@@ -1153,10 +1294,8 @@ class ExpensesAnalysisWidget(BaseWidget):
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
 
-        month_rows = self._selected_rows()
-        month_debits = [row for row in month_rows if self._direction(row) == "debit"]
-        top_vendors = self._vendor_summary(month_debits)[:8]
-        scoped = self._month_scoped_metrics(month_debits)
+        top_vendors = list(self.widget_data.get("vendorSummary", []))[:8]
+        scoped = self._selected_scoped_metrics()
 
         top_vendors_card = self._top_vendors_card(top_vendors)
         month_card       = self._month_scoped_kpi_card(scoped)
@@ -1178,6 +1317,12 @@ class ExpensesAnalysisWidget(BaseWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+
+        if self.selected_month <= 0:
+            total_rows = int(self.widget_data.get("selectedMetrics", {}).get("transactionCount", 0) or 0)
+            layout.addWidget(self._plain_meta_label(f"All Months {self.selected_year} | {total_rows} row(s)", role="secondary"))
+            layout.addWidget(self._year_ledger_summary())
+            return layout
 
         month_rows = self._selected_rows()
         groups     = self._ledger_groups()
@@ -1206,6 +1351,37 @@ class ExpensesAnalysisWidget(BaseWidget):
         if not month_rows and not groups:
             layout.addWidget(self._empty_card("No rows for current month", "The calendar stays month-scoped. Other months can still appear in the year chart above."))
         return layout
+
+    def _year_ledger_summary(self) -> QWidget:
+        """Render an actionable month summary when the All Months filter is active."""
+
+        card = CardFrame(bg=self.theme.hex("surface_strong"), border=self._ui_color("divider"), glow="#00000000", radius=0)
+        grid = QGridLayout(card)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        months = list(self.widget_data.get("selectedYearMonths", []))
+        by_month = {int(item.get("month", 0) or 0): item for item in months}
+        for month in range(1, 13):
+            item = by_month.get(month, {"month": month, "amount": 0.0})
+            label = datetime(self.selected_year, month, 1).strftime("%b")
+            month_card = ClickableCardFrame(
+                bg=self._ui_color("panel_alt"),
+                border=self._ui_color("divider"),
+                glow="#00000000",
+                radius=0,
+                on_click=lambda value=month: self._apply_month_selection(value, partial=False),
+            )
+            month_card.setAccessibleName(f"Open {label} {self.selected_year} ledger")
+            month_layout = QVBoxLayout(month_card)
+            month_layout.setContentsMargins(10, 8, 10, 8)
+            month_layout.setSpacing(3)
+            month_layout.addWidget(make_label(label.upper(), self._ui_color("secondary"), 8, True))
+            month_layout.addWidget(make_label(self._format_inr(float(item.get("amount", 0.0) or 0.0)), self._ui_color("primary"), 10, True, mono=True))
+            grid.addWidget(month_card, (month - 1) // 4, (month - 1) % 4)
+        for column in range(4):
+            grid.setColumnStretch(column, 1)
+        return card
 
     def _build_ledger_busy_indicator(self) -> QWidget:
         busy = self.ledger_action_busy or self.ledger_rows_busy or self.ledger_groups_busy
@@ -1279,6 +1455,10 @@ class ExpensesAnalysisWidget(BaseWidget):
 
         self.vendor_search_input = QLineEdit()
         self.vendor_search_input.setPlaceholderText("Search vendor names or aliases")
+        if bool(self.widget_data.get("meta", {}).get("vendorDirectoryTruncated")):
+            self.vendor_search_input.setToolTip(
+                "Suggestions show the most active vendors in this range. Press Enter to search the full local vendor directory."
+            )
         self.vendor_search_input.setText(self.pending_vendor_text or self.vendor_search_text)
         self.vendor_search_input.setStyleSheet(self._input_style())
         self.vendor_search_input.textChanged.connect(self._vendor_search_changed)
@@ -2171,8 +2351,8 @@ class ExpensesAnalysisWidget(BaseWidget):
         grid.setVerticalSpacing(3)
         grid.addWidget(make_label("Largest debit", self.theme.hex("text_muted"), 8, True), 0, 0)
         grid.addWidget(make_label("Median debit", self.theme.hex("text_muted"), 8, True), 0, 1)
-        grid.addWidget(make_label(f"{self._format_inr(scoped['largest_amount']).replace('INR ', '')} INR", self._ui_color("primary"), 12, True, mono=True), 1, 0)
-        grid.addWidget(make_label(f"{self._format_inr(scoped['median_amount']).replace('INR ', '')} INR", self.theme.hex("emerald"), 12, True, mono=True), 1, 1)
+        grid.addWidget(make_label(self._format_inr(scoped['largest_amount']), self._ui_color("primary"), 12, True, mono=True), 1, 0)
+        grid.addWidget(make_label(self._format_inr(scoped['median_amount']), self.theme.hex("emerald"), 12, True, mono=True), 1, 1)
         grid.addWidget(make_label(scoped["largest_vendor"], self.theme.hex("amber"), 9, True, mono=True), 2, 0)
         layout.addLayout(grid)
         return card
@@ -2191,8 +2371,8 @@ class ExpensesAnalysisWidget(BaseWidget):
         grid.setVerticalSpacing(3)
         grid.addWidget(make_label(f"Peak day ({scoped['peak_day_label']})", self.theme.hex("text_muted"), 8, True), 0, 0)
         grid.addWidget(make_label(f"Peak week ({scoped['peak_week_label']})", self.theme.hex("text_muted"), 8, True), 0, 1)
-        grid.addWidget(make_label(f"{self._format_inr(scoped['peak_day_amount']).replace('INR ', '')} INR", self._ui_color("primary"), 12, True, mono=True), 1, 0)
-        grid.addWidget(make_label(f"{self._format_inr(scoped['peak_week_amount']).replace('INR ', '')} INR", self._ui_color("primary"), 12, True, mono=True), 1, 1)
+        grid.addWidget(make_label(self._format_inr(scoped['peak_day_amount']), self._ui_color("primary"), 12, True, mono=True), 1, 0)
+        grid.addWidget(make_label(self._format_inr(scoped['peak_week_amount']), self._ui_color("primary"), 12, True, mono=True), 1, 1)
         layout.addLayout(grid)
         return card
 
@@ -2205,7 +2385,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         layout.setSpacing(6)
         layout.addWidget(make_label("Recurring spend", self.theme.hex("text_muted"), 9, True))
 
-        recurring_line = f"{self._format_inr(scoped['recurring_amount']).replace('INR ', '')} INR"
+        recurring_line = self._format_inr(scoped['recurring_amount'])
         layout.addWidget(make_label(recurring_line, self._ui_color("primary"), 12, True, mono=True))
         layout.addWidget(make_label(scoped["recurring_label"], self.theme.hex("emerald"), 10, True, mono=True))
 
@@ -2218,7 +2398,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         burden_row.setContentsMargins(0, 0, 0, 0)
         burden_row.setSpacing(8)
         burden_row.addWidget(make_label("Monthly burden", self.theme.hex("text_muted"), 9, True), 2)
-        burden_row.addWidget(make_label(f"{self._format_inr(scoped['monthly_burden']).replace('INR ', '')} INR", self._ui_color("primary"), 11, True, mono=True), 2)
+        burden_row.addWidget(make_label(self._format_inr(scoped['monthly_burden']), self._ui_color("primary"), 11, True, mono=True), 2)
         burden_row.addWidget(make_label(f"Across {scoped['active_recurring_count']} vendors", self.theme.hex("text_secondary"), 9, False), 2)
         layout.addLayout(burden_row)
         return card
@@ -2323,7 +2503,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         debit_total = float(group.get("debitTotal", 0.0) or 0.0) if group else 0.0
         outer.addStretch(1)
         total_label = make_label(
-            self._format_inr(debit_total) if debit_total else "INR 0",
+            self._format_inr(debit_total),
             self._ui_color("primary") if debit_total else self._ui_color("muted"),
             7,
             True,
@@ -2827,8 +3007,28 @@ class ExpensesAnalysisWidget(BaseWidget):
             title,
             sorted_rows,
             self._format_inr(total_amount),
-            self._popup_transaction_card,
+            self._open_vendor_from_popup,
+            self._toggle_ignore_transaction,
+            self._load_popup_provenance,
         )
+
+    def _load_popup_provenance(self, transaction_key: str) -> None:
+        worker = SourceProvenanceWorker(transaction_key=transaction_key, loader=self.screen_api.list_transaction_sources)
+        worker.signals.finished.connect(self._show_popup_provenance)
+        worker.signals.failed.connect(lambda _key, message: self.transaction_popup.meta_label.setText(f"Could not load source details: {message}"))
+        self.ledger_rows_thread_pool.start(worker)
+
+    def _show_popup_provenance(self, transaction_key: str, rows: list) -> None:
+        detail = QDialog(self.transaction_popup)
+        detail.setWindowTitle("Source Details")
+        layout = QVBoxLayout(detail)
+        layout.addWidget(make_label(f"{transaction_key}\n{len(rows)} supporting source record(s)", self._ui_color("primary"), 9, True, mono=True))
+        for row in rows:
+            layout.addWidget(make_label(f"{row.get('providerId', '')} · {row.get('recordType', '')} · {row.get('matchKind', '')}\n{row.get('sourceUri', '')}", self._ui_color("secondary"), 8, False, mono=True))
+        close = self._action_button("Close")
+        close.clicked.connect(detail.accept)
+        layout.addWidget(close)
+        detail.exec()
         self.transaction_popup.exec()
 
     def _open_vendor_from_popup(self, vendor: str, vendor_key: str) -> None:
@@ -2954,7 +3154,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         return [row for row in rows if query in self._ledger_search_blob(row)]
 
     def _ledger_groups(self) -> list[dict[str, Any]]:
-        cache_key = (self.selected_year, self.selected_month, self.show_ignored, self.ledger_search_text.lower())
+        cache_key = (self.selected_year, self.selected_month, self.selected_currency, self.show_ignored, self.ledger_search_text.lower())
         groups = self.ledger_groups_cache.get(cache_key)
         if groups is not None:
             return groups
@@ -2962,7 +3162,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         return []
 
     def _request_ledger_groups(self, cache_key: tuple[Any, ...] | None = None) -> None:
-        cache_key = cache_key or (self.selected_year, self.selected_month, self.show_ignored, self.ledger_search_text.lower())
+        cache_key = cache_key or (self.selected_year, self.selected_month, self.selected_currency, self.show_ignored, self.ledger_search_text.lower())
         if self._active_ledger_groups_request_key == cache_key and self.ledger_groups_busy:
             return
         self._ledger_groups_request_id += 1
@@ -2979,6 +3179,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             cache_key=cache_key,
             year=self.selected_year,
             month=self.selected_month,
+            currency=self.selected_currency,
             include_ignored=self.show_ignored,
             search_text=self.ledger_search_text,
         )
@@ -3023,7 +3224,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             toggle.setText("-")
 
     def _ledger_group_rows(self, group_key: str) -> list[dict[str, Any]]:
-        cache_key = (self.selected_year, self.selected_month, self.show_ignored, self.ledger_search_text.lower(), group_key)
+        cache_key = (self.selected_year, self.selected_month, self.selected_currency, self.show_ignored, self.ledger_search_text.lower(), group_key)
         return self.group_rows_cache.get(cache_key, [])
 
     def _bind_group_loading(self, layout: QGridLayout) -> None:
@@ -3033,7 +3234,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         layout.addWidget(loading, 0, 0)
 
     def _request_ledger_group_rows(self, group_key: str, *, kind: str, body: QWidget | None = None, body_layout: QGridLayout | None = None, toggle: QWidget | None = None, day_number: int | None = None) -> None:
-        cache_key = (self.selected_year, self.selected_month, self.show_ignored, self.ledger_search_text.lower(), group_key)
+        cache_key = (self.selected_year, self.selected_month, self.selected_currency, self.show_ignored, self.ledger_search_text.lower(), group_key)
         if self._active_ledger_rows_request_key == cache_key and self.ledger_rows_busy:
             return
         self._ledger_rows_request_id += 1
@@ -3043,9 +3244,6 @@ class ExpensesAnalysisWidget(BaseWidget):
         self._pending_ledger_request = {
             "kind": kind,
             "group_key": group_key,
-            "body": body,
-            "body_layout": body_layout,
-            "toggle": toggle,
             "day_number": day_number,
         }
         self.ledger_rows_busy = True
@@ -3058,6 +3256,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             cache_key=cache_key,
             year=self.selected_year,
             month=self.selected_month,
+            currency=self.selected_currency,
             group_key=group_key,
             include_ignored=self.show_ignored,
             search_text=self.ledger_search_text,
@@ -3075,13 +3274,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         self.ledger_rows_job_label = ""
         self.ledger_rows_error = ""
         self._pending_ledger_request = None
-        if pending.get("kind") == "group" and pending.get("body_layout") is not None:
-            self._bind_group_rows(str(pending.get("group_key", "")), pending["body_layout"], self.group_rows_cache[cache_key])
-            if pending.get("body") is not None:
-                pending["body"].show()
-            if pending.get("toggle") is not None and hasattr(pending["toggle"], "setText"):
-                pending["toggle"].setText("-")
-        elif pending.get("kind") == "popup":
+        if pending.get("kind") == "popup":
             day_number = int(pending.get("day_number") or 0)
             if day_number > 0:
                 title = datetime(self.selected_year, self.selected_month, day_number).strftime("Ledger | %d %b %Y")
@@ -3095,13 +3288,7 @@ class ExpensesAnalysisWidget(BaseWidget):
         self.ledger_rows_busy = False
         self.ledger_rows_job_label = ""
         self.ledger_rows_error = message
-        pending = dict(self._pending_ledger_request or {})
         self._pending_ledger_request = None
-        if pending.get("kind") == "group" and pending.get("body_layout") is not None:
-            self.clear_layout(pending["body_layout"])
-            error_label = make_label("Could not load ledger rows.", self._ui_color("danger"), 8, False)
-            error_label.setWordWrap(True)
-            pending["body_layout"].addWidget(error_label, 0, 0)
         self._render_ledger_panel()
 
     def _bind_group_rows(self, group_key: str, layout: QGridLayout, rows: list[dict[str, Any]]) -> None:
@@ -3128,12 +3315,13 @@ class ExpensesAnalysisWidget(BaseWidget):
         """Return vendor and alias autocomplete items without collapsing them into one identity."""
 
         normalized_query = query.strip().lower()
-        if hasattr(self.screen_api, "search_vendor_directory"):
-            if normalized_query not in self.vendor_autocomplete_cache:
-                self.vendor_autocomplete_cache[normalized_query] = list(self.screen_api.search_vendor_directory(query, limit=80))
-            cached_items = self.vendor_autocomplete_cache.get(normalized_query, [])
-            if cached_items:
-                return [dict(item) for item in cached_items]
+        # The current snapshot already contains the complete selected-range vendor
+        # directory. Keeping autocomplete local avoids a blocking SQL query on every
+        # keystroke; vendor records outside this range remain available through New
+        # Vendor / the catalog editor.
+        cached_items = self.vendor_autocomplete_cache.get(normalized_query, [])
+        if cached_items:
+            return [dict(item) for item in cached_items]
 
         items: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
@@ -3900,6 +4088,36 @@ class ExpensesAnalysisWidget(BaseWidget):
             "active_recurring_count": active_count,
         }
 
+    def _selected_scoped_metrics(self) -> dict[str, Any]:
+        """Map complete service-side selected aggregates to the insight card contract."""
+
+        insights = dict(self.widget_data.get("selectedInsights", {}))
+        averages = dict(self.widget_data.get("selectedAverages", {}))
+        largest = dict(insights.get("largestTransaction", {}))
+        peak_day = dict(insights.get("highestSpendDay", {}))
+        peak_week = dict(insights.get("highestSpendWeek", {}))
+        recurring = dict(insights.get("strongestRecurring", {}))
+        recurring_vendor = str(recurring.get("vendor", "")).strip()
+        recurring_cadence = str(recurring.get("cadence", "")).strip()
+        return {
+            "largest_amount": float(largest.get("amount", 0.0) or 0.0),
+            "largest_vendor": str(largest.get("vendor", "NO_VENDOR") or "NO_VENDOR").upper(),
+            "median_amount": float(insights.get("medianTransactionAmount", 0.0) or 0.0),
+            "peak_day_label": str(peak_day.get("label", "--") or "--"),
+            "peak_day_amount": float(peak_day.get("amount", 0.0) or 0.0),
+            "peak_week_label": str(peak_week.get("label", "--") or "--"),
+            "peak_week_amount": float(peak_week.get("amount", 0.0) or 0.0),
+            "recurring_amount": float(recurring.get("averageAmount", 0.0) or 0.0),
+            "recurring_label": (
+                f"{recurring_vendor.upper()} | {recurring_cadence.upper()}"
+                if recurring_vendor and recurring_cadence
+                else "NO_STABLE_PATTERN"
+            ),
+            "monthly_burden": float(insights.get("recurringMonthlyBurden", 0.0) or 0.0),
+            "active_recurring_count": int(insights.get("recurringActiveCount", 0) or 0),
+            "average_debit": float(averages.get("averageTransactionAmount", 0.0) or 0.0),
+        }
+
     def _daily_series(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.selected_month <= 0:
             return []
@@ -3970,12 +4188,19 @@ class ExpensesAnalysisWidget(BaseWidget):
             return
         self.selected_year = int(value)
         self.selected_page = 1
-        self._load_analysis_snapshot()
         self._reset_ledger_state()
         self._invalidate_vendor_detail_cache()
-        self._ensure_active_vendor()
-        self._render()
-        self._ensure_vendor_panel_loaded()
+        self._load_analysis_snapshot()
+
+    def _currency_changed(self, value: Any) -> None:
+        currency = str(value or "").strip().upper()
+        if not currency or currency == self.selected_currency:
+            return
+        self.selected_currency = currency
+        self.selected_page = 1
+        self._reset_ledger_state()
+        self._invalidate_vendor_detail_cache()
+        self._load_analysis_snapshot()
 
     def _month_changed(self, value: Any) -> None:
         if value is None:
@@ -3985,28 +4210,16 @@ class ExpensesAnalysisWidget(BaseWidget):
     def _ignored_changed(self, checked: bool) -> None:
         self.show_ignored  = checked
         self.selected_page = 1
-        self._load_analysis_snapshot()
         self._reset_ledger_state()
         self._invalidate_vendor_detail_cache()
-        self._ensure_active_vendor()
-        self._render()
-        self._ensure_vendor_panel_loaded()
+        self._load_analysis_snapshot()
 
     def _apply_month_selection(self, month_value: int, *, partial: bool) -> None:
-        if month_value <= 0:
-            return
         self.selected_month = month_value
         self.selected_page  = 1
-        self._load_analysis_snapshot()
         self._reset_ledger_state()
         self._invalidate_vendor_detail_cache()
-        self._ensure_active_vendor()
-        if partial and self.root.count() > 0:
-            self._render_month_scoped_sections()
-            self._ensure_vendor_panel_loaded()
-            return
-        self._render()
-        self._ensure_vendor_panel_loaded()
+        self._load_analysis_snapshot()
 
     def _change_page(self, page: int) -> None:
         self.selected_page = max(1, page)
@@ -4052,9 +4265,8 @@ class ExpensesAnalysisWidget(BaseWidget):
     def _apply_ledger_search(self) -> None:
         self.ledger_search_text = self.pending_ledger_text.strip()
         self.selected_page      = 1
-        self._load_analysis_snapshot()
         self._reset_ledger_state()
-        self._render()
+        self._load_analysis_snapshot()
 
     def _vendor_search_changed(self, text: str) -> None:
         self.pending_vendor_text = text
@@ -4069,19 +4281,66 @@ class ExpensesAnalysisWidget(BaseWidget):
         self.vendor_search_text = self.pending_vendor_text.strip()
 
     def _load_analysis_snapshot(self) -> None:
-        """Refresh the bounded DB-backed analysis payload for current filters."""
+        """Refresh the bounded DB-backed analysis payload outside the GUI thread."""
 
         loader = getattr(self.screen_api, "get_analysis_snapshot", None)
         if not callable(loader):
             return
-        self.widget_data = loader(
-            year=self.selected_year,
-            month=self.selected_month,
-            include_ignored=True,
-            search_text=self.ledger_search_text,
+        self._analysis_snapshot_request_id += 1
+        request_id = self._analysis_snapshot_request_id
+        self.analysis_snapshot_busy = True
+        self.analysis_snapshot_error = ""
+        self._set_analysis_filter_enabled(False)
+        worker = AnalysisSnapshotWorker(
+            loader=loader,
+            request_id=request_id,
+            filters={
+                "year": self.selected_year,
+                "month": self.selected_month,
+                "currency": self.selected_currency,
+                "include_ignored": True,
+                "search_text": self.ledger_search_text,
+            },
         )
+        worker.signals.finished.connect(self._analysis_snapshot_loaded)
+        worker.signals.failed.connect(self._analysis_snapshot_failed)
+        self.analysis_snapshot_thread_pool.start(worker)
+
+    def _analysis_snapshot_loaded(self, request_id: int, payload: dict[str, Any]) -> None:
+        if request_id != self._analysis_snapshot_request_id:
+            return
+        self.analysis_snapshot_busy = False
+        self.analysis_snapshot_error = ""
+        self.widget_data = dict(payload)
         self.vendor_autocomplete_cache.clear()
         self._sync_state_from_data(reset=False)
+        self._reset_ledger_state()
+        self._invalidate_vendor_detail_cache()
+        self._ensure_active_vendor()
+        self._set_analysis_filter_enabled(True)
+        self._render_summary_panel()
+        self._render_charts_panel()
+        self._render_insights_panel()
+        self._render_ledger_panel()
+        self._render_vendor_panel()
+        self._ensure_vendor_panel_loaded()
+
+    def _analysis_snapshot_failed(self, request_id: int, message: str) -> None:
+        if request_id != self._analysis_snapshot_request_id:
+            return
+        self.analysis_snapshot_busy = False
+        self.analysis_snapshot_error = str(message or "Could not update analysis.")
+        self._set_analysis_filter_enabled(True)
+        if self.search_input is not None:
+            self.search_input.setToolTip(self.analysis_snapshot_error)
+
+    def _set_analysis_filter_enabled(self, enabled: bool) -> None:
+        for control in (self.year_combo, self.month_combo, self.currency_combo):
+            if control is not None:
+                control.setEnabled(enabled)
+        if self.search_input is not None:
+            self.search_input.setAccessibleDescription("" if enabled else "Updating analysis")
+            self.search_input.setToolTip("" if enabled else "Updating analysis in the background…")
 
     def _set_active_vendor(
         self,
@@ -4139,7 +4398,22 @@ class ExpensesAnalysisWidget(BaseWidget):
             target_vendor = vendor or str(item.get("canonicalVendor", "")).strip() or "Unknown"
             ranked.append((score[0], score[1], index, target_vendor, vendor_key, item))
         if not ranked:
-            return
+            directory_search = getattr(self.screen_api, "search_vendor_directory", None)
+            if callable(directory_search):
+                # The snapshot intentionally bounds suggestions for large ledgers.
+                # A deliberate Enter search can still resolve a less-frequent vendor.
+                try:
+                    remote_items = [dict(item) for item in directory_search(label, limit=40) if isinstance(item, dict)]
+                except Exception:  # noqa: BLE001
+                    remote_items = []
+                for index, item in enumerate(remote_items):
+                    vendor = str(item.get("vendor", "")).strip()
+                    vendor_key = str(item.get("vendorKey", vendor)).strip() or vendor
+                    score = self._vendor_match_score(item, query)
+                    if vendor_key and score is not None:
+                        ranked.append((score[0], score[1], index, vendor or "Unknown", vendor_key, item))
+            if not ranked:
+                return
         if any(item[0] <= 1 for item in ranked):
             ranked = [item for item in ranked if item[0] <= 1]
         ranked.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -4162,6 +4436,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             alias_key.strip() or vendor_name.strip(),
             self.selected_year,
             self.selected_month,
+            self.selected_currency,
             bool(self.show_ignored),
         )
 
@@ -4204,6 +4479,7 @@ class ExpensesAnalysisWidget(BaseWidget):
             recurring_patterns    = list(self.widget_data.get("recurringPatterns", [])),
             selected_year         = self.selected_year,
             selected_month        = self.selected_month,
+            selected_currency     = self.selected_currency,
             dismissed_suggestions = self.dismissed_merge_suggestions.get(alias_key or vendor_name, set()),
             load_rows             = getattr(self.screen_api, "list_vendor_transactions", None),
         )
@@ -4711,7 +4987,8 @@ class ExpensesAnalysisWidget(BaseWidget):
         return stamp.strftime("%d %b %H:%M")
 
     def _format_inr(self, amount: float) -> str:
-        return f"INR {amount:,.0f}" if abs(amount) >= 1 else f"INR {amount:,.2f}"
+        currency = str(self.selected_currency or self.widget_data.get("meta", {}).get("currency", "INR")).strip().upper() or "INR"
+        return f"{currency} {amount:,.0f}" if abs(amount) >= 1 else f"{currency} {amount:,.2f}"
 
     def _format_signed_inr(self, amount: float) -> str:
         return f"+ {self._format_inr(amount)}" if amount >= 0 else f"- {self._format_inr(abs(amount))}"

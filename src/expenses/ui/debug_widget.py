@@ -60,9 +60,11 @@ class ExpensesMailDebugWidget(BaseWidget):
         super().__init__(widget_config, widget_data, theme, screen_api, window_api, parent)
         self.loading = False
         self.detail_loading = False
+        self._detail_request_id = 0
         self.validating = False
         self.saving = False
         self.reparsing = False
+        self.mining = False
         self.expenses_job_running = False
         self.summary: dict[str, Any] = {}
         self.rows: list[dict[str, Any]] = []
@@ -72,6 +74,7 @@ class ExpensesMailDebugWidget(BaseWidget):
         self.overrides_text = ""
         self.effective_text = ""
         self.script_extractors: dict[str, Any] = {}
+        self.template_suggestions: list[dict[str, Any]] = []
         self.status_message = ""
         self.status_tone = "muted"
         self._build_ui()
@@ -215,6 +218,16 @@ class ExpensesMailDebugWidget(BaseWidget):
         self.reparse_button.setToolTip("Re-run the active rules against every stored candidate email.")
         self.reparse_button.clicked.connect(self._reparse_candidates)
         top_actions.addWidget(self.reparse_button)
+
+        self.mine_templates_button = make_button(
+            "Mine Templates",
+            self.theme.hex("divider", self.theme.hex("border")),
+            self.theme.hex("text_primary"),
+            self.theme.hex("surface_panel_alt"),
+        )
+        self.mine_templates_button.setToolTip("Cluster stored email candidates into masked, review-only message templates.")
+        self.mine_templates_button.clicked.connect(self._mine_templates)
+        top_actions.addWidget(self.mine_templates_button)
         body_layout.addLayout(top_actions)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -308,6 +321,22 @@ class ExpensesMailDebugWidget(BaseWidget):
         self.add_bank_button.setToolTip("Append a new regex-based bank rule template to the local override JSON.")
         self.add_bank_button.clicked.connect(self._insert_bank_template)
         rule_actions.addWidget(self.add_bank_button)
+
+        self.mined_template_combo = QComboBox()
+        self.mined_template_combo.setMinimumWidth(260)
+        self.mined_template_combo.setToolTip("Select a mined template before inserting its editable rule draft.")
+        self.mined_template_combo.addItem("Mine templates to create a draft", "")
+        rule_actions.addWidget(self.mined_template_combo, 1)
+
+        self.add_mined_button = make_button(
+            "Insert Mined Draft",
+            self.theme.hex("divider", self.theme.hex("border")),
+            self.theme.hex("text_primary"),
+            self.theme.hex("surface_panel_alt"),
+        )
+        self.add_mined_button.setToolTip("Insert the selected mined template as an editable, unsaved rule draft.")
+        self.add_mined_button.clicked.connect(self._insert_mined_template)
+        rule_actions.addWidget(self.add_mined_button)
 
         self.save_button = make_button(
             "Save Overrides",
@@ -477,29 +506,33 @@ class ExpensesMailDebugWidget(BaseWidget):
     def _load_selected_detail(self, source_record_id: int) -> None:
         """Load one candidate detail in the background."""
 
-        if self.detail_loading:
-            return
         self.detail_loading = True
+        self._detail_request_id += 1
+        request_id = self._detail_request_id
         self.detail_meta.setText("Loading selected candidate...")
         self.detail_body.clear()
         self.detail_result.clear()
         self._refresh_view_state()
         worker = _TaskWorker(self.screen_api.get_candidate_mail_detail, source_record_id)
-        worker.signals.finished.connect(self._handle_detail_success)
-        worker.signals.failed.connect(self._handle_detail_failed)
+        worker.signals.finished.connect(lambda result, token=request_id, expected=source_record_id: self._handle_detail_success(token, expected, result))
+        worker.signals.failed.connect(lambda message, token=request_id: self._handle_detail_failed(token, message))
         self.window_api.thread_pool.start(worker)
 
-    def _handle_detail_success(self, result: object) -> None:
+    def _handle_detail_success(self, request_id: int, expected_source_record_id: int, result: object) -> None:
         """Apply one completed candidate-detail load."""
 
+        if request_id != self._detail_request_id or expected_source_record_id != self.selected_source_record_id:
+            return
         self.detail_loading = False
         self.detail = dict(result) if isinstance(result, dict) else None
         self._render_detail()
         self._refresh_view_state()
 
-    def _handle_detail_failed(self, message: str) -> None:
+    def _handle_detail_failed(self, request_id: int, message: str) -> None:
         """Show one failed candidate-detail load."""
 
+        if request_id != self._detail_request_id:
+            return
         self.detail_loading = False
         self.detail = None
         self.detail_meta.setText(str(message or "Could not load candidate detail."))
@@ -650,6 +683,92 @@ class ExpensesMailDebugWidget(BaseWidget):
         worker.signals.failed.connect(self._handle_reparse_failed)
         self.window_api.thread_pool.start(worker)
 
+    def _mine_templates(self) -> None:
+        """Mine local message templates on a worker; suggestions never change rules."""
+
+        if self.mining or self.saving or self.validating or self.loading or self.expenses_job_running:
+            return
+        self.mining = True
+        self.status_message = "Mining masked message templates from stored candidate emails..."
+        self.status_tone = "info"
+        self._refresh_view_state()
+        worker = _TaskWorker(self.screen_api.mine_bank_alert_templates)
+        worker.signals.finished.connect(self._handle_template_mining_success)
+        worker.signals.failed.connect(self._handle_template_mining_failed)
+        self.window_api.thread_pool.start(worker)
+
+    def _handle_template_mining_success(self, result: object) -> None:
+        """Render template choices without exposing any message body."""
+
+        self.mining = False
+        payload = dict(result) if isinstance(result, dict) else {}
+        self.template_suggestions = [dict(item) for item in payload.get("templates", []) if isinstance(item, dict)]
+        self.mined_template_combo.clear()
+        if not self.template_suggestions:
+            self.mined_template_combo.addItem("No repeated templates found", "")
+            self.status_message = "No repeated templates found yet. Import at least two similar candidate emails, then try again."
+            self.status_tone = "muted"
+        else:
+            for item in self.template_suggestions:
+                label = f"{item.get('senderHint', 'unknown')} · {int(item.get('support', 0) or 0):,} messages"
+                self.mined_template_combo.addItem(label, str(item.get("templateKey", "")))
+            self.status_message = (
+                f"Found {len(self.template_suggestions):,} masked template(s). Select one and insert an editable draft; "
+                "it will not become active until you review and save overrides."
+            )
+            self.status_tone = "success"
+        self._refresh_view_state()
+
+    def _handle_template_mining_failed(self, message: str) -> None:
+        """Show one template-mining failure without changing local rules."""
+
+        self.mining = False
+        self.status_message = str(message or "Could not mine message templates.")
+        self.status_tone = "error"
+        self._refresh_view_state()
+
+    def _insert_mined_template(self) -> None:
+        """Build the selected mined cluster into an unsaved editable rule draft."""
+
+        template_key = str(self.mined_template_combo.currentData() or "").strip()
+        if not template_key or self.mining or self.saving or self.validating or self.loading or self.expenses_job_running:
+            return
+        self.mining = True
+        self.status_message = "Building an editable rule draft from the selected template..."
+        self.status_tone = "info"
+        self._refresh_view_state()
+        worker = _TaskWorker(self.screen_api.build_mined_bank_rule_draft, template_key)
+        worker.signals.finished.connect(self._handle_mined_draft_success)
+        worker.signals.failed.connect(self._handle_template_mining_failed)
+        self.window_api.thread_pool.start(worker)
+
+    def _handle_mined_draft_success(self, result: object) -> None:
+        """Append one generated draft to the editor without persisting it."""
+
+        self.mining = False
+        payload = dict(result) if isinstance(result, dict) else {}
+        draft = payload.get("draft", {}) if isinstance(payload.get("draft", {}), dict) else {}
+        if not draft:
+            self.status_message = "The selected template did not produce a rule draft."
+            self.status_tone = "error"
+            self._refresh_view_state()
+            return
+        try:
+            overrides = self._read_override_payload()
+        except ValueError as exc:
+            self.status_message = str(exc)
+            self.status_tone = "error"
+            self._refresh_view_state()
+            return
+        overrides.setdefault("banks", []).append(draft)
+        self.overrides_editor.setPlainText(json.dumps(overrides, indent=2) + "\n")
+        self.status_message = (
+            f"Inserted mined draft '{draft.get('id', '')}'. Review its sender/subject match and extraction regexes, "
+            "then Validate On Selected Mail and Save Overrides to activate it."
+        )
+        self.status_tone = "info"
+        self._refresh_view_state()
+
     def _handle_reparse_success(self, result: object) -> None:
         """Apply one completed reparse result."""
 
@@ -681,11 +800,14 @@ class ExpensesMailDebugWidget(BaseWidget):
     def _refresh_view_state(self) -> None:
         """Refresh button state and the inline status banner."""
 
-        busy = self.loading or self.detail_loading or self.validating or self.saving or self.reparsing or self.expenses_job_running
+        busy = self.loading or self.detail_loading or self.validating or self.saving or self.reparsing or self.mining or self.expenses_job_running
         self.reload_button.setEnabled(not busy)
         self.reparse_button.setEnabled(not busy and bool(self.rows))
+        self.mine_templates_button.setEnabled(not busy)
         self.validate_button.setEnabled(not busy and self.selected_source_record_id > 0)
         self.add_bank_button.setEnabled(not busy)
+        self.mined_template_combo.setEnabled(not busy and bool(self.template_suggestions))
+        self.add_mined_button.setEnabled(not busy and bool(self.mined_template_combo.currentData()))
         self.save_button.setEnabled(not busy)
         self.filter_combo.setEnabled(not busy and bool(self.rows))
         self._apply_banner_tone(
